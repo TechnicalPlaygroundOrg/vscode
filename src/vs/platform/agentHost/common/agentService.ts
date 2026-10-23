@@ -165,36 +165,6 @@ export const AgentHostOverlapProviderPreparationSettingId = 'chat.agentHost.expe
 export const AgentHostPrewarmSessionsSettingId = 'chat.agentHost.experimental.prewarmSessions';
 
 /**
- * Configuration key gating multiple-working-directory support for the Copilot
- * agent-host provider. When `true`, the Copilot provider advertises the
- * `multipleWorkingDirectories` capability, so a session created in a multi-root
- * workspace can span every workspace folder. Hidden from the Settings UI and
- * off by default while the feature is dogfooded; the agent host re-advertises
- * on change, so newly created sessions pick it up without a restart.
- */
-export const AgentHostCopilotMultiRootEnabledSettingId = 'chat.agentHost.copilotAgent.multiRootEnabled';
-
-/**
- * Configuration key gating multiple-working-directory support for the Claude
- * agent-host provider. When `true`, the Claude provider advertises the
- * `multipleWorkingDirectories` capability, so a session created in a multi-root
- * workspace can span every workspace folder. Independent of
- * {@link AgentHostCopilotMultiRootEnabledSettingId} because the Claude Agent SDK
- * already supports additional directories while the Copilot SDK does not. Hidden
- * from the Settings UI and off by default while the feature is dogfooded; the
- * agent host re-advertises on change, so newly created sessions pick it up
- * without a restart.
- */
-export const AgentHostClaudeMultiRootEnabledSettingId = 'chat.agentHost.claudeAgent.multiRootEnabled';
-
-/**
- * Configuration key gating multiple-working-directory support for the Codex
- * agent-host provider. Hidden from the Settings UI and off by default while the
- * feature is dogfooded.
- */
-export const AgentHostCodexMultiRootEnabledSettingId = 'chat.agentHost.codexAgent.multiRootEnabled';
-
-/**
  * Experimentation setting id gating the conditional agent-window auth feature.
  * When `true`, the agent window opens for a signed-out user instead of forcing
  * GitHub sign-in; each session type then gates on its own GitHub requirement, so
@@ -440,13 +410,19 @@ export const AgentHostOTelEnvVars = Object.freeze({
 	ExporterType: 'COPILOT_OTEL_EXPORTER_TYPE',
 	OtlpEndpoint: 'OTEL_EXPORTER_OTLP_ENDPOINT',
 	OtlpEndpointAlt: 'COPILOT_OTEL_ENDPOINT',
+	OtlpTracesEndpoint: 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+	OtlpMetricsEndpoint: 'OTEL_EXPORTER_OTLP_METRICS_ENDPOINT',
 	OtlpProtocol: 'OTEL_EXPORTER_OTLP_PROTOCOL',
+	OtlpProtocolAlt: 'COPILOT_OTEL_PROTOCOL',
 	OtlpTracesProtocol: 'OTEL_EXPORTER_OTLP_TRACES_PROTOCOL',
 	OtlpMetricsProtocol: 'OTEL_EXPORTER_OTLP_METRICS_PROTOCOL',
 	OtlpHeaders: 'OTEL_EXPORTER_OTLP_HEADERS',
+	OtlpTracesHeaders: 'OTEL_EXPORTER_OTLP_TRACES_HEADERS',
+	OtlpMetricsHeaders: 'OTEL_EXPORTER_OTLP_METRICS_HEADERS',
 	CaptureContent: 'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT',
 	CaptureIdentity: 'COPILOT_OTEL_CAPTURE_IDENTITY',
 	FilePath: 'COPILOT_OTEL_FILE_EXPORTER_PATH',
+	FilePathIsManaged: 'VSCODE_AGENT_HOST_OTEL_FILE_PATH_IS_MANAGED',
 	SourceName: 'COPILOT_OTEL_SOURCE_NAME',
 	ServiceName: 'OTEL_SERVICE_NAME',
 	ResourceAttributes: 'OTEL_RESOURCE_ATTRIBUTES',
@@ -651,31 +627,48 @@ export function buildAgentHostOTelEnv(
 		setIfMissing(AgentHostOTelEnvVars.DbSpanExporterEnabled, 'true');
 	}
 
-	if (policySettings.enabled !== undefined) {
-		setPolicy(AgentHostOTelEnvVars.Enabled, policySettings.enabled ? 'true' : 'false');
-		if (!policySettings.enabled) {
-			setPolicy(AgentHostOTelEnvVars.OtlpEndpoint, '');
-			setPolicy(AgentHostOTelEnvVars.OtlpEndpointAlt, '');
+	const clearCollectorDestination = (): void => {
+		setPolicy(AgentHostOTelEnvVars.OtlpEndpoint, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpEndpointAlt, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpTracesEndpoint, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpMetricsEndpoint, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpProtocol, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpProtocolAlt, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpTracesProtocol, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpMetricsProtocol, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpHeaders, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpTracesHeaders, '');
+		setPolicy(AgentHostOTelEnvVars.OtlpMetricsHeaders, '');
+	};
+	const hasManagedFilePath = policySettings.outfile !== undefined && (policySettings.outfile !== '' || policySettings.exporterType === 'file');
+	if (policySettings.enabled === false) {
+		setPolicy(AgentHostOTelEnvVars.Enabled, 'false');
+		clearCollectorDestination();
+		setPolicy(AgentHostOTelEnvVars.FilePath, '');
+		setPolicy(AgentHostOTelEnvVars.DbSpanExporterEnabled, '');
+	} else if (hasManagedFilePath) {
+		setPolicy(AgentHostOTelEnvVars.Enabled, 'true');
+		setPolicy(AgentHostOTelEnvVars.ExporterType, 'file');
+		setPolicy(AgentHostOTelEnvVars.FilePath, policySettings.outfile);
+		clearCollectorDestination();
+	} else {
+		setPolicy(AgentHostOTelEnvVars.FilePath, policySettings.outfile);
+		if (policySettings.enabled !== undefined) {
+			setPolicy(AgentHostOTelEnvVars.Enabled, policySettings.enabled ? 'true' : 'false');
+		}
+		if (policySettings.exporterType !== undefined) {
+			setPolicy(AgentHostOTelEnvVars.ExporterType, policySettings.exporterType);
 			setPolicy(AgentHostOTelEnvVars.FilePath, '');
 		}
-	}
-	if (policySettings.exporterType !== undefined) {
-		setPolicy(AgentHostOTelEnvVars.ExporterType, policySettings.exporterType);
-		setPolicy(AgentHostOTelEnvVars.FilePath, '');
-	}
-	if (policySettings.otlpProtocol !== undefined && policySettings.otlpProtocol !== '') {
-		// Mirror the CLI: thread the managed protocol into the generic AND per-signal protocol
-		// env vars so it wins over any user-provided OTEL_EXPORTER_OTLP_{,TRACES_,METRICS_}PROTOCOL.
-		setPolicy(AgentHostOTelEnvVars.OtlpProtocol, policySettings.otlpProtocol);
-		setPolicy(AgentHostOTelEnvVars.OtlpTracesProtocol, policySettings.otlpProtocol);
-		setPolicy(AgentHostOTelEnvVars.OtlpMetricsProtocol, policySettings.otlpProtocol);
-	}
-	if (policySettings.otlpEndpoint !== undefined) {
-		setPolicy(AgentHostOTelEnvVars.OtlpEndpoint, policySettings.otlpEndpoint);
-		setPolicy(AgentHostOTelEnvVars.FilePath, '');
-	}
-	if (policySettings.outfile !== undefined) {
-		setPolicy(AgentHostOTelEnvVars.FilePath, policySettings.outfile);
+		if (policySettings.otlpProtocol !== undefined && policySettings.otlpProtocol !== '') {
+			setPolicy(AgentHostOTelEnvVars.OtlpProtocol, policySettings.otlpProtocol);
+			setPolicy(AgentHostOTelEnvVars.OtlpTracesProtocol, policySettings.otlpProtocol);
+			setPolicy(AgentHostOTelEnvVars.OtlpMetricsProtocol, policySettings.otlpProtocol);
+		}
+		if (policySettings.otlpEndpoint !== undefined) {
+			setPolicy(AgentHostOTelEnvVars.OtlpEndpoint, policySettings.otlpEndpoint);
+			setPolicy(AgentHostOTelEnvVars.FilePath, '');
+		}
 	}
 	if (policySettings.captureContent !== undefined) {
 		setPolicy(AgentHostOTelEnvVars.CaptureContent, policySettings.captureContent ? 'true' : 'false');
@@ -689,6 +682,11 @@ export function buildAgentHostOTelEnv(
 	const policyResourceAttributes = serializeResourceAttributes(policySettings.resourceAttributes);
 	if (policyResourceAttributes !== undefined) {
 		setPolicy(AgentHostOTelEnvVars.ResourceAttributes, policyResourceAttributes);
+	}
+	if (hasManagedFilePath && policySettings.enabled !== false) {
+		setPolicy(AgentHostOTelEnvVars.FilePathIsManaged, 'true');
+	} else if (inheritedEnv[AgentHostOTelEnvVars.FilePathIsManaged] !== undefined) {
+		setPolicy(AgentHostOTelEnvVars.FilePathIsManaged, 'false');
 	}
 	return out;
 }
