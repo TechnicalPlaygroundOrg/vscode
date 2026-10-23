@@ -47,6 +47,8 @@ import type { ClientNotificationMap, CommandMap, JsonRpcErrorResponse, JsonRpcRe
 import { ActionType, type ActionEnvelope, type ChatAction, type ClientAnnotationsAction, type ClientAutomationAction, type ClientAutomationRunAction, type ClientChangesetAction, type INotification, type IRootConfigChangedAction, type SessionAction, type TerminalAction } from '../common/state/sessionActions.js';
 import { getOlderHostDefaultChat } from './agentHostOlderHostCompatibility.js';
 import { MessageAttachmentKind, SessionSummary, ROOT_STATE_URI, StateComponents, isAhpRootChannel, isAhpChatChannel, isSessionChatArchived, isSessionStatusRead, type ClientPluginCustomization, type SessionState, type Message, type RootState } from '../common/state/sessionState.js';
+import type { AgentChatMoveDestination } from '../common/agentHostChatMove.js';
+import { ChatMoveDestinationKind } from '../common/state/protocol/channels-chat/commands.js';
 import { normalizeLegacyActionEnvelope } from '../common/state/legacyProtocolCompatibility.js';
 import { getAgentHostSupportedProtocolVersions } from '../common/agentHostProtocolCompatibility.js';
 import { isJsonRpcNotification, isJsonRpcRequest, isJsonRpcResponse, ProtocolError, ReconnectResultType, JSON_RPC_INTERNAL_ERROR, type ProtocolMessage, type IStateSnapshot, type SubscribeResult } from '../common/state/sessionProtocol.js';
@@ -1419,6 +1421,9 @@ export class AgentHostProtocolClient extends Disposable implements IAgentConnect
 	private _updateWorkspaceTrust(): void {
 		const remoteAuthority = typeof this._resourceIdentity === 'string' && this._resourceIdentity.startsWith(`${Schemas.vscodeRemote}://`)
 			? URI.parse(this._resourceIdentity).authority : undefined;
+		const connectionAuthorityTrusted = this._resourceIdentity !== LOCAL_AGENT_HOST_RESOURCE_IDENTITY
+			&& ((remoteAuthority !== undefined && this._workspaceTrustManagementService.isAuthorityTrusted?.(Schemas.vscodeRemote, remoteAuthority) === true)
+				|| this._workspaceTrustManagementService.isAuthorityTrusted?.(AGENT_HOST_SCHEME, this._connectionAuthority) === true);
 		const trustedUris = this._workspaceTrustManagementService.getTrustedUris()
 			.filter(uri => this._resourceIdentity === LOCAL_AGENT_HOST_RESOURCE_IDENTITY
 				? uri.scheme === Schemas.file
@@ -1431,6 +1436,7 @@ export class AgentHostProtocolClient extends Disposable implements IAgentConnect
 			[AgentHostWorkspaceTrustConfigKey]: {
 				enabled: this._workspaceTrustEnablementService.isWorkspaceTrustEnabled(),
 				trustedUris,
+				...(connectionAuthorityTrusted ? { connectionAuthorityTrusted: true } : {}),
 			},
 		});
 	}
@@ -1803,6 +1809,16 @@ export class AgentHostProtocolClient extends Disposable implements IAgentConnect
 			throw new AgentHostSessionMoveUnsupportedError();
 		}
 		const result = await this._sendExtensionRequest(MoveAgentHostSessionExtensionMethod, { session: session.toString(), destination: destination.toString(), after: after?.toString() ?? null });
+		return URI.parse(result.session);
+	}
+
+	async moveChat(chat: URI, destination: AgentChatMoveDestination): Promise<URI> {
+		const result = await this._sendRequest('moveChat', {
+			channel: chat.toString(),
+			destination: destination.kind === 'session'
+				? { kind: ChatMoveDestinationKind.Session, session: destination.session.toString(), ...(destination.after ? { after: destination.after.toString() } : {}) }
+				: { kind: ChatMoveDestinationKind.NewSession },
+		});
 		return URI.parse(result.session);
 	}
 
