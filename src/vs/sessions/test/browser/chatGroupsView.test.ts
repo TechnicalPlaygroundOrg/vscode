@@ -339,6 +339,21 @@ suite('Sessions - ChatGroupsView', () => {
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 	const options = {};
 
+	test('releases the main chat resource observable when clearing the session', () => {
+		const { view } = createHarness(disposables);
+		view.setSession(new TestActiveSession([createChat('main')]), options);
+		const before = view['_mainChatResource'] !== undefined;
+		view.setSession(undefined, options);
+		assert.deepStrictEqual([before, view['_mainChatResource']], [true, undefined]);
+	});
+
+	test('releases the main chat resource observable on disposal', () => {
+		const { view } = createHarness(disposables);
+		view.setSession(new TestActiveSession([createChat('main')]), options);
+		view.dispose();
+		assert.strictEqual(view['_mainChatResource'], undefined);
+	});
+
 	test('aligns transcript overlays with full-width split chats', () => {
 		const workbench = mainWindow.document.createElement('div');
 		workbench.classList.add('agent-sessions-workbench');
@@ -1419,6 +1434,19 @@ suite('Sessions - ChatGroupsView', () => {
 		});
 	});
 
+	test('a read-only draft uses the transcript view and returns to the composer when available', () => {
+		const { view } = createHarness(disposables);
+		const chat = createChat('draft', SessionStatus.Untitled);
+		const draft = new TestActiveSession([chat], undefined, false);
+		view.setSession(draft, options);
+		const kinds = [view.element.querySelector<HTMLElement>('.chat-view')?.dataset.kind];
+		chat.interactivity.set(ChatInteractivity.ReadOnly, undefined);
+		kinds.push(view.element.querySelector<HTMLElement>('.chat-view')?.dataset.kind);
+		chat.interactivity.set(ChatInteractivity.Full, undefined);
+		kinds.push(view.element.querySelector<HTMLElement>('.chat-view')?.dataset.kind);
+		assert.deepStrictEqual(kinds, ['newSession', 'chat', 'newSession']);
+	});
+
 	test('new session request activity switches the draft to the chat view', () => {
 		const { view } = createHarness(disposables);
 		const draft = new TestActiveSession([createChat('draft', SessionStatus.Untitled)], undefined, false);
@@ -1933,6 +1961,16 @@ suite('Sessions - ChatGroupsView', () => {
 		assert.deepStrictEqual({ readOnly, blocked, archived: readBanner(view).message }, {
 			readOnly: true, blocked: false, archived: 'Archived sessions are read-only.',
 		});
+	});
+
+	test('shows an actionless policy history explanation on first read-only open', () => {
+		const { chatViewFactory, view } = createHarness(disposables);
+		const chat = createChat('main');
+		chat.interactivity.set(ChatInteractivity.ReadOnly, undefined);
+		view.setSession(new TestActiveSession([chat]), options);
+		const current = chatViewFactory.views.at(-1)!;
+		current.historyStatus.set({ kind: 'history', message: 'Your organization has disabled this agent.' }, undefined);
+		assert.deepStrictEqual(readBanner(view), { visible: true, message: 'Your organization has disabled this agent.', action: undefined });
 	});
 
 	test('shows Refresh only for failed history and prioritizes connection feedback after input', async () => {
