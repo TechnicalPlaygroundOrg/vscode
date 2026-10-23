@@ -37,7 +37,7 @@ import { DEFAULT_LOCAL_TRANSCRIPTION_MODEL } from '../../../../platform/localTra
 import { McpAccessValue, McpAutoStartValue, mcpAccessConfig, mcpAllowedServersConfig, mcpAppsEnabledConfig, mcpAutoStartConfig, mcpDeniedServersConfig, mcpGalleryServiceEnablementConfig, mcpGalleryServiceUrlConfig } from '../../../../platform/mcp/common/mcpManagement.js';
 import { AgentNetworkFilterService, IAgentNetworkFilterService } from '../../../../platform/networkFilter/common/networkFilterService.js';
 import { AgentNetworkDomainSettingId } from '../../../../platform/networkFilter/common/settings.js';
-import { COPILOT_ALLOWED_MCP_SERVERS_KEY, COPILOT_ALLOW_MANAGED_HOOKS_ONLY_CONFIG, COPILOT_ALLOW_MANAGED_HOOKS_ONLY_KEY, COPILOT_ALLOW_MANAGED_MCP_SERVERS_ONLY_CONFIG, COPILOT_ALLOW_MANAGED_MCP_SERVERS_ONLY_KEY, COPILOT_DENIED_MCP_SERVERS_KEY, COPILOT_DISABLE_BYPASS_PERMISSIONS_MODE_KEY, COPILOT_ENABLED_PLUGINS_KEY, COPILOT_EXTRA_MARKETPLACES_KEY, COPILOT_MODEL_KEY, COPILOT_STRICT_MARKETPLACES_KEY, COPILOT_STRICT_PLUGIN_ONLY_CUSTOMIZATION_CONFIG, COPILOT_STRICT_PLUGIN_ONLY_CUSTOMIZATION_KEY, COPILOT_TOP_LEVEL_MODEL_KEY, managedModelValue, managedSettingValue } from '../../../../platform/policy/common/copilotManagedSettings.js';
+import { COPILOT_ALLOWED_MCP_SERVERS_KEY, COPILOT_ALLOW_MANAGED_HOOKS_ONLY_CONFIG, COPILOT_ALLOW_MANAGED_HOOKS_ONLY_KEY, COPILOT_ALLOW_MANAGED_MCP_SERVERS_ONLY_CONFIG, COPILOT_ALLOW_MANAGED_MCP_SERVERS_ONLY_KEY, COPILOT_DENIED_MCP_SERVERS_KEY, COPILOT_DISABLE_BYPASS_PERMISSIONS_MODE_KEY, COPILOT_ENABLED_PLUGINS_KEY, COPILOT_EXTRA_MARKETPLACES_KEY, COPILOT_MODEL_KEY, COPILOT_STRICT_MARKETPLACES_KEY, COPILOT_STRICT_PLUGIN_ONLY_CUSTOMIZATION_CONFIG, COPILOT_STRICT_PLUGIN_ONLY_CUSTOMIZATION_KEY, COPILOT_TOP_LEVEL_MODEL_KEY, managedModelValue, managedSettingsDisabledValue, managedSettingValue } from '../../../../platform/policy/common/copilotManagedSettings.js';
 import product from '../../../../platform/product/common/product.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { AgentSandboxEnabledValue, AgentSandboxSettingId } from '../../../../platform/sandbox/common/settings.js';
@@ -274,6 +274,12 @@ configurationRegistry.registerConfiguration({
 			tags: ['experimental'],
 			agentsWindow: { default: true },
 		},
+		'chat.experimentalModelPicker': {
+			type: 'boolean',
+			description: nls.localize('chat.experimentalModelPicker', "When enabled, the model picker uses a tab per model provider and configures thinking effort and context from a detail card next to each model, instead of a separate configuration button."),
+			default: false,
+			tags: ['experimental'],
+		},
 		'chat.fontSize': {
 			type: 'number',
 			description: nls.localize('chat.fontSize', "Controls the font size in pixels in chat messages."),
@@ -374,7 +380,7 @@ configurationRegistry.registerConfiguration({
 		},
 		'dictation.experimental.llmCleanupModel': {
 			type: 'string',
-			enum: ['auto', 'copilot-utility-small', 'gpt-5.4-nano', 'gpt-5.6-luna'],
+			enum: ['auto', 'copilot-utility-small', 'gpt-5.6-luna'],
 			markdownDescription: nls.localize('dictation.experimental.llmCleanupModel', "Controls the language model used for experimental dictation cleanup. `auto` follows the experiment-provided default."),
 			default: 'auto',
 			tags: ['experimental'],
@@ -465,8 +471,8 @@ configurationRegistry.registerConfiguration({
 			type: 'boolean',
 			default: false,
 			scope: ConfigurationScope.APPLICATION,
-			description: nls.localize('chat.agentSessions.consolidatedRemoteWorkspaces', "Controls whether GitHub and remote workspaces are combined under Remote in the Agents Window workspace picker, with search always available."),
-			tags: ['preview'],
+			description: nls.localize('chat.agentSessions.consolidatedRemoteWorkspaces', "Controls whether GitHub and remote workspaces are combined under Remote in the Agents Window workspace picker, with search always available and, when supported, a No workspace option."),
+			tags: ['experimental'],
 			experiment: { mode: 'auto' },
 		},
 		[ChatConfiguration.SaveBeforeSend]: {
@@ -1625,6 +1631,18 @@ configurationRegistry.registerConfiguration({
 			description: nls.localize('chat.agentHost.customTerminalTool.enabled', "When enabled, Copilot SDK sessions use the Agent Host terminal tool override instead of the SDK's default terminal behavior."),
 			default: false,
 			tags: ['experimental', 'advanced'],
+			policy: {
+				name: 'ChatAgentHostCustomTerminalTool',
+				category: PolicyCategory.InteractiveSession,
+				minimumVersion: '1.137',
+				value: managedSettingsDisabledValue,
+				localization: {
+					description: {
+						key: 'chat.agentHost.customTerminalTool.enabled.policy',
+						value: nls.localize('chat.agentHost.customTerminalTool.enabled.policy', "Enable the Agent Host custom terminal tool override for Copilot SDK sessions."),
+					}
+				}
+			},
 		},
 		[AgentHostShellToolInitScriptEnabledSettingId]: {
 			type: 'boolean',
@@ -2418,10 +2436,24 @@ configurationRegistry.registerConfiguration({
 				mode: 'auto'
 			}
 		},
+		[ChatConfiguration.SubagentsDefaultToAuto]: {
+			type: 'boolean',
+			markdownDescription: nls.localize('chat.subagents.defaultToAuto', "Controls whether local subagents use the Auto model when neither the tool call nor the selected agent specifies a model. Explicit tool and agent model selections take precedence. Subagents of a BYOK main model continue to use that model. Auto routing is not constrained by the main model's fixed cost tier."),
+			default: false,
+			tags: ['experimental'],
+			experiment: {
+				mode: 'auto'
+			},
+		},
 		[ChatConfiguration.SubagentsUseRichRendering]: {
 			type: 'boolean',
 			description: nls.localize('chat.subagents.useRichRendering', "Controls whether subagents in chat editors use a rich presentation that opens each subagent in its own editor instead of rendering its full activity inline in the parent chat."),
 			default: true,
+		},
+		[ChatConfiguration.SubagentsShowCreditUsage]: {
+			type: 'boolean',
+			description: nls.localize('chat.subagents.showCreditUsage', "Controls whether AI credit usage is shown next to the duration for subagents."),
+			default: false,
 		},
 		[ChatConfiguration.TerminalAgentHostEnabled]: {
 			type: 'boolean',
