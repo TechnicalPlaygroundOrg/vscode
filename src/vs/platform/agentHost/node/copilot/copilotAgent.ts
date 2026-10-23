@@ -3149,6 +3149,10 @@ export class CopilotAgent extends Disposable implements IAgent {
 		return true;
 	}
 
+	async stopBackgroundWork(chat: URI, id: string): Promise<boolean> {
+		return await this._findChatByUri(chat)?.stopBackgroundWork(id) ?? false;
+	}
+
 	private readonly _copilotChatDiscovery: CopilotChatDiscovery;
 	private readonly _discoveredChats = new Map<string, { readonly signature: string; readonly external: boolean }>();
 
@@ -4143,6 +4147,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 	private async _resumeTurnOnce(chat: URI, turnId: string, operationContext: URI | IAgentChatContext, senderClientId?: string, clientType = AgentHostClientType.Unknown): Promise<void> {
 		const context = this._resolveChatContext(chat, operationContext);
 		const clientTelemetryContext = URI.isUri(operationContext) ? undefined : operationContext.clientTelemetryContext;
+		const stageRecorder = URI.isUri(operationContext) ? undefined : operationContext.sendStageRecorder;
 		await this._queueChatTurn(context, 'resumeTurn', turnId, async token => {
 			const current = this._resolveChatContext(chat, operationContext);
 			const cachedEntry = current.target;
@@ -4158,7 +4163,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 			if (token.isCancellationRequested) {
 				throw new CancellationError();
 			}
-			await entry.resume(turnId, this._resolveSdkMode(current.configurationResource), senderClientId, clientType, clientTelemetryContext, !URI.isUri(operationContext) && operationContext.agentMergeTurn === true);
+			await entry.resume(turnId, this._resolveSdkMode(current.configurationResource), senderClientId, clientType, clientTelemetryContext, !URI.isUri(operationContext) && operationContext.agentMergeTurn === true, stageRecorder);
 		});
 	}
 
