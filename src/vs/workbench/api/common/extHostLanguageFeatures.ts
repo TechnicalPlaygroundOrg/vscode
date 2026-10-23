@@ -789,7 +789,8 @@ class NavigateTypeAdapter {
 	async provideWorkspaceSymbols(search: string, token: CancellationToken): Promise<extHostProtocol.IWorkspaceSymbolsDto> {
 		const value = await this._provider.provideWorkspaceSymbols(search, token);
 
-		if (!isNonEmptyArray(value)) {
+		// Canceled requests cannot release their cache entries, so discard late provider results before caching them.
+		if (!isNonEmptyArray(value) || token.isCancellationRequested) {
 			return { symbols: [] };
 		}
 
@@ -1945,7 +1946,7 @@ class CallHierarchyAdapter {
 		const pos = typeConvert.Position.to(position);
 
 		const items = await this._provider.prepareCallHierarchy(doc, pos, token);
-		if (!items) {
+		if (!items || token.isCancellationRequested) {
 			return undefined;
 		}
 
@@ -2025,7 +2026,7 @@ class TypeHierarchyAdapter {
 		const pos = typeConvert.Position.to(position);
 
 		const items = await this._provider.prepareTypeHierarchy(doc, pos, token);
-		if (!items) {
+		if (!items || token.isCancellationRequested) {
 			return undefined;
 		}
 
