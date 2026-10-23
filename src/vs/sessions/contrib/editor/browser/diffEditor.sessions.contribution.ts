@@ -11,7 +11,7 @@ import { isCodeEditor, isDiffEditor } from '../../../../editor/browser/editorBro
 import { DiffEditorViewMode } from '../../../../editor/common/config/editorOptions.js';
 import { ITextResourceConfigurationService } from '../../../../editor/common/services/textResourceConfiguration.js';
 import { localize } from '../../../../nls.js';
-import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
+import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationNode, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
@@ -21,7 +21,7 @@ import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase 
 import { IEditorService } from '../../../../workbench/services/editor/common/editorService.js';
 import { MultiDiffEditor } from '../../../../workbench/contrib/multiDiffEditor/browser/multiDiffEditor.js';
 import { SessionChangesEditor } from '../../changes/browser/sessionChangesEditor.js';
-import { IDiffEditorOptionsService, SESSIONS_EDITOR_WORD_WRAP_SETTING } from '../common/diffEditorOptionsService.js';
+import { IDiffEditorOptionsService, SESSIONS_DIFF_EDITOR_WORD_WRAP_SETTING, SESSIONS_EDITOR_WORD_WRAP_SETTING } from '../common/diffEditorOptionsService.js';
 import { DiffEditorOptionsService } from './diffEditorOptionsService.js';
 
 /** Drives the shared preferred diff layout for supported editors in the Agents window. */
@@ -122,14 +122,23 @@ export class SessionsDiffEditorLayoutContribution extends Disposable implements 
 		this._register(this.editorService.onDidVisibleEditorsChange(() => this.applyLayout()));
 		this._register(autorun(reader => {
 			this.diffEditorOptionsService.viewMode.read(reader);
-			this.diffEditorOptionsService.wordWrap.read(reader);
-			this.applyLayout();
+			this.diffEditorOptionsService.diffEditorWordWrap.read(reader);
+			this.applyDiffEditorLayout();
+		}));
+		this._register(autorun(reader => {
+			this.diffEditorOptionsService.editorWordWrap.read(reader);
+			this.applyCodeEditorWordWrap();
 		}));
 	}
 
 	private applyLayout(): void {
+		this.applyDiffEditorLayout();
+		this.applyCodeEditorWordWrap();
+	}
+
+	private applyDiffEditorLayout(): void {
 		const viewMode = this.diffEditorOptionsService.viewMode.get();
-		const wordWrap = this.diffEditorOptionsService.wordWrap.get();
+		const wordWrap = this.diffEditorOptionsService.diffEditorWordWrap.get();
 		for (const pane of new Set([this.editorService.activeEditorPane, ...this.editorService.visibleEditorPanes])) {
 			if (pane instanceof TextDiffEditor) {
 				const control = pane.getControl();
@@ -141,13 +150,17 @@ export class SessionsDiffEditorLayoutContribution extends Disposable implements 
 					});
 				}
 			} else if (pane instanceof MultiDiffEditor) {
-				pane.setDiffEditorViewMode(viewMode);
-				pane.setDiffEditorWordWrap(wordWrap);
-			} else {
-				const control = pane?.getControl();
-				if (isCodeEditor(control)) {
-					control.updateOptions({ wordWrapOverride2: wordWrap });
-				}
+				pane.setDiffEditorLayoutOptions(viewMode, wordWrap);
+			}
+		}
+	}
+
+	private applyCodeEditorWordWrap(): void {
+		const wordWrap = this.diffEditorOptionsService.editorWordWrap.get();
+		for (const pane of new Set([this.editorService.activeEditorPane, ...this.editorService.visibleEditorPanes])) {
+			const control = pane?.getControl();
+			if (isCodeEditor(control)) {
+				control.updateOptions({ wordWrapOverride1: wordWrap });
 			}
 		}
 	}
@@ -157,9 +170,23 @@ registerSingleton(IDiffEditorOptionsService, DiffEditorOptionsService, Instantia
 registerSingleton(IDiffEditorCommandsService, SessionsDiffEditorCommandsService, InstantiationType.Delayed);
 registerWorkbenchContribution2(SessionsDiffEditorLayoutContribution.ID, SessionsDiffEditorLayoutContribution, WorkbenchPhase.AfterRestored);
 
-Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
+export const sessionsEditorWordWrapConfiguration = {
 	id: 'sessions',
 	properties: {
+		[SESSIONS_DIFF_EDITOR_WORD_WRAP_SETTING]: {
+			type: 'string',
+			enum: ['off', 'on', 'inherit'],
+			default: 'inherit',
+			scope: ConfigurationScope.APPLICATION,
+			tags: ['experimental'],
+			experiment: { mode: 'auto' },
+			markdownEnumDescriptions: [
+				localize('sessions.diffEditor.wordWrap.off', "Lines will never wrap."),
+				localize('sessions.diffEditor.wordWrap.on', "Lines will wrap at the viewport width."),
+				localize('sessions.diffEditor.wordWrap.inherit', "Lines will wrap according to the {0} setting.", '`#editor.wordWrap#`'),
+			],
+			description: localize('sessions.diffEditor.wordWrap', "Controls how diff editors in the Agents window wrap lines."),
+		},
 		[SESSIONS_EDITOR_WORD_WRAP_SETTING]: {
 			type: 'string',
 			enum: ['off', 'on', 'inherit'],
@@ -172,7 +199,9 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 				localize('sessions.editor.wordWrap.on', "Lines will wrap at the viewport width."),
 				localize('sessions.editor.wordWrap.inherit', "Lines will wrap according to the {0} setting.", '`#editor.wordWrap#`'),
 			],
-			description: localize('sessions.editor.wordWrap', "Controls how editors in the Agents window wrap lines."),
+			description: localize('sessions.editor.wordWrap', "Controls how code editors in the Agents window wrap lines."),
 		},
 	},
-});
+} satisfies IConfigurationNode;
+
+Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration(sessionsEditorWordWrapConfiguration);
