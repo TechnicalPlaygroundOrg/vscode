@@ -280,6 +280,27 @@ export interface IAgentPluginUninstallRequest {
 	readonly directSourceId?: string;
 }
 
+export type AgentCanvasExtensionSource = 'user' | 'project' | 'session' | 'plugin' | 'unknown';
+
+/** One canvas declaration available to an initialized provider chat. */
+export interface IAgentCanvasInfo {
+	readonly canvasId: string;
+	readonly extensionId: string;
+	readonly extensionSource: AgentCanvasExtensionSource;
+	readonly extensionName?: string;
+	readonly displayName: string;
+	readonly description: string;
+	readonly requiresInput: boolean;
+	readonly actionCount: number;
+}
+
+/** Opens or focuses one stable canvas instance in an initialized provider chat. */
+export interface IAgentCanvasOpenRequest {
+	readonly canvasId: string;
+	readonly extensionId?: string;
+	readonly instanceId: string;
+}
+
 export interface IAgentCustomizationInstallationCatalogue {
 	readonly resourceId?: string;
 	readonly itemUrl?: string;
@@ -334,6 +355,7 @@ export interface IAgentCustomizationMarketplaceSearchItem {
 	readonly publisher?: string;
 	readonly pluginName?: string;
 	readonly marketplace?: string;
+	readonly marketplaceSource?: string;
 	readonly itemUrl?: string;
 	readonly version?: string;
 	readonly repository?: string;
@@ -1135,6 +1157,8 @@ export interface IAgentToolPendingConfirmationSignal {
 	readonly permissionKind?: 'shell' | 'write' | 'mcp' | 'read' | 'url' | 'skill' | 'custom-tool' | 'hook' | 'memory' | 'workflow' | 'extension-management' | 'extension-permission-access' | 'extension-env-access';
 	/** Host-only auto-approval path target (not part of the dispatched action). */
 	readonly permissionPath?: string;
+	/** Host-only command for shell approval when the displayed tool input contains structured arguments. */
+	readonly shellCommand?: string;
 	/**
 	 * Host-only flag requiring the client to show a confirmation instead of applying host auto-approval.
 	 * The runtime currently sets it for managed Shell, Read, Edit, and Domain selector asks.
@@ -1434,6 +1458,12 @@ export interface IAgent {
 
 	/** Uninstall a plugin through the provider that owns its installation state. */
 	uninstallPlugin?(request: IAgentPluginUninstallRequest): Promise<void>;
+
+	/** List canvas declarations available to one initialized provider chat. */
+	listSessionCanvases?(session: URI, chat: URI): Promise<readonly IAgentCanvasInfo[]>;
+
+	/** Open or focus one canvas instance in an initialized provider chat. */
+	openSessionCanvas?(session: URI, request: IAgentCanvasOpenRequest, chat: URI): Promise<void>;
 
 	/** Install a plugin through the provider that owns its installation state. */
 	installPlugin?(request: IAgentPluginInstallRequest): Promise<void>;
