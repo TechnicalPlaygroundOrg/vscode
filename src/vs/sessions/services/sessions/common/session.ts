@@ -360,40 +360,6 @@ export type ISessionTurnFileChange = ISessionFileChange & {
 };
 
 /**
- * The kind of change applied to a {@link ISessionFile}.
- *
- * A file that is first created and then edited during the session is reported
- * as {@link Created}. A file that is deleted is reported as {@link Deleted}
- * regardless of any earlier creation or edit.
- */
-export const enum SessionFileOperation {
-	/** The file was created during the session (and possibly edited afterwards). */
-	Created = 'created',
-	/** The file existed before the session and was modified during it. */
-	Modified = 'modified',
-	/** The file was deleted during the session. */
-	Deleted = 'deleted',
-}
-
-/**
- * A file that was created, edited or deleted **outside** the session workspace
- * folders during the session. These are surfaced separately from
- * {@link ISession.changes} because they are not part of the workspace and will
- * not be committed.
- */
-export interface ISessionFile {
-	/** The file URI (after-state for create/modify, the deleted path for delete). */
-	readonly uri: URI;
-	/** The kind of change applied to the file during the session. */
-	readonly operation: SessionFileOperation;
-	/**
-	 * URI from which the file's pre-session content can be read, when known.
-	 * Used to render a diff for {@link SessionFileOperation.Modified} files.
-	 */
-	readonly originalUri?: URI;
-}
-
-/**
  * Well-known id of the changeset that holds the diff between a session's branch
  * and its base (e.g. `main...feature`). Shared so that consumers which always
  * want the branch diff — regardless of the changeset currently selected in the
@@ -716,6 +682,8 @@ export interface ISession {
 	readonly isAutomation?: IObservable<boolean>;
 	/** Whether this session was discovered in an application other than the current host. Absent means `false`. */
 	readonly isExternal?: IObservable<boolean>;
+	/** Session turn that created this session, when it was created by another agent session. */
+	readonly createdBySession?: IObservable<ISessionCreationReference | undefined>;
 
 	// Reactive properties
 
@@ -733,13 +701,6 @@ export interface ISession {
 	readonly changes: IObservable<readonly ISessionFileChange[]>;
 	/** Changesets produced by the session. */
 	readonly changesets: IObservable<readonly ISessionChangeset[] | undefined>;
-	/**
-	 * Files created, edited or deleted **outside** the session workspace folders
-	 * during the session (e.g. config files in the user's home directory). These
-	 * are not part of {@link changes} and will not be committed. Providers that
-	 * cannot determine this report an empty array (or omit the observable).
-	 */
-	readonly externalChanges?: IObservable<readonly ISessionFile[]>;
 	/** Artifacts the agent recorded for this session (pull requests, issues, files, …). */
 	readonly artifacts?: IObservable<readonly ISessionArtifact[]>;
 	/** Currently selected model identifier. */
@@ -766,6 +727,12 @@ export interface ISession {
 	 * arrives after the session's first state update).
 	 */
 	readonly capabilities: IObservable<ISessionCapabilities>;
+}
+
+export interface ISessionCreationReference {
+	readonly session: URI;
+	readonly chat?: URI;
+	readonly turnId?: string;
 }
 
 /** Returns whether any chat or session-level fallback reports file changes. */
