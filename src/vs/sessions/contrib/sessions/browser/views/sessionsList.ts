@@ -106,7 +106,6 @@ import { buildOpenSessionLinkUri } from '../../../../../platform/agentHost/commo
 import { LocalSelectionTransfer } from '../../../../../platform/dnd/browser/dnd.js';
 import { DraggedSessionIdentifier, fillSessionChatDragData, SessionsDataTransfers } from '../../../../browser/dnd.js';
 import { getSessionsListChatDrop, getSessionsListSessionDrop, isChatMoveDndEnabled, ISessionsListChatDropTarget, runSessionsListMove, SessionsListChatDrop, SessionsListMove, SessionsListSessionDrop } from './sessionsListChatMove.js';
-import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IDragAndDropData } from '../../../../../base/browser/dnd.js';
@@ -2184,13 +2183,19 @@ export function getSessionOnboardingTargetId(session: ISession): string {
  * The folder a chat works in, shown on its row when the session spans more than
  * one project and the chat works in exactly one folder.
  */
+/**
+ * The folder a chat row shows: in a session with folders of several roots, the chat's own folder; in a session without
+ * a workspace (a quick chat), the folder of a chat that has one of its own (a chat moved in with its folder).
+ */
 function getChatWorkspaceBadgeLabel(sessionWorkspace: ISessionWorkspace | undefined, chatWorkspace: ISessionWorkspace | undefined): string | undefined {
-	const firstSessionFolder = sessionWorkspace?.folders[0];
-	if (
-		!firstSessionFolder ||
-		!sessionWorkspace.folders.some(folder => !isEqual(folder.root, firstSessionFolder.root)) ||
-		chatWorkspace?.folders.length !== 1
-	) {
+	if (chatWorkspace?.folders.length !== 1) {
+		return undefined;
+	}
+	if (!sessionWorkspace) {
+		return chatWorkspace.folders[0].name;
+	}
+	const firstSessionFolder = sessionWorkspace.folders[0];
+	if (!firstSessionFolder || !sessionWorkspace.folders.some(folder => !isEqual(folder.root, firstSessionFolder.root))) {
 		return undefined;
 	}
 	return chatWorkspace.folders[0].name;
@@ -4142,7 +4147,6 @@ export class SessionsList extends Disposable implements ISessionsList {
 		@ITelemetryService private readonly telemetryService: ITelemetryService,
 		@IAccessibilityService accessibilityService: IAccessibilityService,
 		@IChatEntitlementService private readonly chatEntitlementService: IChatEntitlementService,
-		@IDialogService private readonly dialogService: IDialogService,
 		@INotificationService private readonly notificationService: INotificationService,
 		@ILogService private readonly logService: ILogService,
 	) {
@@ -5965,7 +5969,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 
 	private runMove(move: SessionsListMove): void {
 		const revealMoved = this.watchMoveForReveal(move);
-		runSessionsListMove(move, this._sessionsManagementService, this.dialogService, this.configurationService, this.notificationService, this.logService).then(revealMoved, error => {
+		runSessionsListMove(move, this._sessionsManagementService, this.notificationService, this.logService).then(revealMoved, error => {
 			revealMoved(false);
 			onUnexpectedError(error);
 		});
