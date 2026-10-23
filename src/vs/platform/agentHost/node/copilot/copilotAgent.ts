@@ -73,7 +73,7 @@ import { IAgentHostGitHubEndpointService } from '../agentHostGitHubEndpointServi
 import { AGENT_HOST_TITLE_SOURCE_AUTO, SESSION_CUSTOM_TITLE_KEY, SESSION_CUSTOM_TITLE_SOURCE_KEY } from '../shared/persistSessionMetadata.js';
 import { IAgentHostCompletions } from '../agentHostCompletions.js';
 import { IAgentHostGitService, META_DIFF_BASE_BRANCH } from '../../common/agentHostGitService.js';
-import { applyMcpServerEnablement, applyMcpServerRuntimeStates, buildMcpTopLevelCustomizationId, type IMcpServerRuntimeState } from '../shared/mcpCustomizationController.js';
+import { applyMcpServerEnablement, applyMcpServerRuntimeStates, buildMcpTopLevelCustomizationId, mergeMcpServerCustomizations, type IMcpServerRuntimeState } from '../shared/mcpCustomizationController.js';
 import { IAgentHostCustomizationEnablementService } from '../agentHostCustomizationEnablementService.js';
 import { getSdkMcpServerEnablement, isCustomizationSdkEligible, resolveCustomizationEnablement } from '../shared/customizationEnablementGate.js';
 import { McpServerStatus, type McpServerCustomization } from '../../common/state/protocol/channels-session/state.js';
@@ -82,6 +82,7 @@ import { IByokLmBridgeRegistry } from '../byokLmBridgeRegistry.js';
 import { IAgentHostWorktreeIsolation, type IAgentHostWorktreeResumeService, SessionWorkingDirectoryMissingError } from '../shared/worktreeIsolation.js';
 import { buildSessionEventLogFromTurns } from './buildSessionEvents.js';
 import { CopilotAgentSession, type ICopilotWorkingDirectoryChangeTransaction } from './copilotAgentSession.js';
+import { deferCopilotSdkExecution, getDeferredCopilotSdkExecution } from './copilotSessionExecutionMarker.js';
 import { createCopilotCliEnvironment } from './copilotCliEnvironment.js';
 import { ICopilotSessionContext, projectFromCopilotContext } from './copilotGitProject.js';
 import { parsedPluginsEqual, toChildCustomizations } from './copilotPluginConverters.js';
@@ -1604,7 +1605,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 			sessionChat?.topLevelMcpCustomizations() ?? this._rootMcpCustomizations(AgentSession.id(session), await activeClient.configuredMcpServers()),
 			sessionChat?.mcpServerOwners?.(),
 		);
-		const customizations = [...fromPlugins, ...topLevelMcp];
+		const customizations = mergeMcpServerCustomizations(fromPlugins, topLevelMcp);
 		return applyMcpServerEnablement(customizations, this._retainedHostCustomizations(session));
 	}
 
@@ -3277,7 +3278,18 @@ export class CopilotAgent extends Disposable implements IAgent {
 		const prewarmed = cache && cache.references > 0 ? cache.metadata.get(sessionId) : undefined;
 		const sessionMetadata = prewarmed ?? await this._retryAfterClosedConnection('getSessionMetadata', client => client.getSessionMetadata(sessionId), createCopilotFailureCorrelation(session, chat, undefined, sessionId));
 		if (!sessionMetadata) {
-			return undefined;
+			const awaitingFirstSdkOperation = isDefaultChatUri(chat) ? await getDeferredCopilotSdkExecution(this._sessionDataService, session, sessionId, this._logService) : undefined;
+			if (!awaitingFirstSdkOperation) {
+				return undefined;
+			}
+			return {
+				chat,
+				startTime: awaitingFirstSdkOperation.startTime,
+				modifiedTime: awaitingFirstSdkOperation.modifiedTime,
+				project: storedMetadata?.project,
+				workingDirectories: storedMetadata?.workingDirectories,
+				_meta: withSessionWorkspaceless(undefined, storedMetadata?.workspaceless ?? false),
+			};
 		}
 
 		let project = storedMetadata?.project;
@@ -4393,6 +4405,7 @@ export class CopilotAgent extends Disposable implements IAgent {
 
 		this._provisionalSessions.delete(sessionId);
 		await this._storeSessionMetadata(sessionUri, provisional.model, workingDirectory, materializedWorkingDirectories, customizationDirectory, project, true);
+		await deferCopilotSdkExecution(this._sessionDataService, sessionUri, sdkSessionId, this._logService);
 		if (agent !== undefined) {
 			await this._storeSessionAgentMetadata(sessionUri, agent);
 		}
@@ -5239,6 +5252,31 @@ export class CopilotAgent extends Disposable implements IAgent {
 			return;
 		}
 		this._chatBackings.set(chatKey, backing);
+		const awaitingFirstSdkOperation = isDefaultChatUri(chat) ? await getDeferredCopilotSdkExecution(this._sessionDataService, resolved.configurationResource, backing.sdkSessionId, this._logService) : undefined;
+		const sdkMetadata = awaitingFirstSdkOperation
+			? await this._retryAfterClosedConnection('getSessionMetadata', client => client.getSessionMetadata(backing.sdkSessionId), createCopilotFailureCorrelation(resolved.configurationResource, chat, undefined, backing.sdkSessionId))
+			: undefined;
+		if (awaitingFirstSdkOperation && !sdkMetadata) {
+			const metadata = await this._readStoredSessionMetadata(resolved.configurationResource);
+			if (metadata?.workingDirectory) {
+				this._provisionalSessions.set(AgentSession.id(resolved.configurationResource), {
+					sessionId: AgentSession.id(resolved.configurationResource),
+					sdkSessionId: backing.sdkSessionId,
+					sessionUri: resolved.configurationResource,
+					chat,
+					isEphemeral: false,
+					hasScopedEditSurface: false,
+					workingDirectory: metadata.workingDirectory,
+					workingDirectories: metadata.workingDirectories,
+					model: backing.model ?? metadata.model,
+					agent: backing.agent ?? metadata.agent,
+					project: metadata.project,
+					workspaceless: metadata.workspaceless,
+				});
+			} else {
+				this._logService.warn(`[Copilot] Cannot restore deferred chat ${chatKey}: missing working directory`);
+			}
+		}
 	}
 
 	async recoverLegacyChat(chat: URI, context: URI | IAgentChatContext): Promise<IAgentCreateChatResult> {
