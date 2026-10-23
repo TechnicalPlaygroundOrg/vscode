@@ -149,7 +149,7 @@ class MockAgentService implements IAgentService {
 	readonly listedSessions: IAgentSessionMetadata[] = [];
 	readonly createSessionConfigs: (IAgentCreateSessionConfig | undefined)[] = [];
 	managedSettingsDiagnostics: readonly IAgentHostManagedSettingsDiagnostics[] = [];
-	readonly getSessionStateFileCalls: string[] = [];
+	readonly getSessionStateFileCalls: { session: string; chat: string | undefined }[] = [];
 	readonly collectDebugLogsCalls: { session: string | undefined; chat: string | undefined; kind: 'archive' | 'directory' }[] = [];
 	shutdownCalls = 0;
 	createSessionBarrier: DeferredPromise<void> | undefined;
@@ -237,8 +237,8 @@ class MockAgentService implements IAgentService {
 	async getNetworkDiagnosticsInfo(): Promise<IAgentHostNetworkDiagnosticsInfo> { return { version: 'test', os: 'test', arch: 'test', proxySettings: {}, proxyEnv: {}, endpoints: [] }; }
 	async getManagedSettingsDiagnostics(): Promise<readonly IAgentHostManagedSettingsDiagnostics[]> { return this.managedSettingsDiagnostics; }
 	async diagnosticsFetch(url: string): Promise<IAgentHostNetworkFetchResult> { return { url }; }
-	async getSessionStateFile(session: URI): Promise<URI | undefined> {
-		this.getSessionStateFileCalls.push(session.toString());
+	async getSessionStateFile(session: URI, chat?: URI): Promise<URI | undefined> {
+		this.getSessionStateFileCalls.push({ session: session.toString(), chat: chat?.toString() });
 		return URI.file('/state/sdk-session/events.jsonl');
 	}
 	async collectDebugLogs(session: URI | undefined, kind: 'archive' | 'directory', chat?: URI) {
@@ -407,8 +407,15 @@ suite('ProtocolServerHandler', () => {
 			assert.fail('should have sent initialize response');
 		}
 		const result = resp.result as InitializeResult;
-		assert.strictEqual(result.protocolVersion, PROTOCOL_VERSION);
-		assert.strictEqual(result.serverSeq, stateManager.serverSeq);
+		assert.deepStrictEqual({
+			protocolVersion: result.protocolVersion,
+			serverSeq: result.serverSeq,
+			meta: result._meta,
+		}, {
+			protocolVersion: PROTOCOL_VERSION,
+			serverSeq: stateManager.serverSeq,
+			meta: { 'vscode.getAgentHostSessionStateFile.chat': true },
+		});
 	});
 
 	test('applies telemetry disablement before reporting the client connection', () => {
@@ -674,9 +681,11 @@ suite('ProtocolServerHandler', () => {
 		const transport = connectClient('client-session-state-file');
 		transport.sent.length = 0;
 		const responsePromise = waitForResponse(transport, 17);
+		const chat = buildChatUri('copilotcli:/session-1', 'peer-1');
 
 		transport.simulateMessage(request(17, 'vscode/getAgentHostSessionStateFile', {
 			session: 'copilotcli:/session-1',
+			chat,
 		}));
 
 		assert.deepStrictEqual({
@@ -688,7 +697,7 @@ suite('ProtocolServerHandler', () => {
 				id: 17,
 				result: { resource: 'file:///state/sdk-session/events.jsonl' },
 			},
-			calls: ['copilotcli:/session-1'],
+			calls: [{ session: 'copilotcli:/session-1', chat }],
 		});
 	});
 
@@ -1000,7 +1009,6 @@ suite('ProtocolServerHandler', () => {
 		const cases: readonly { readonly action: ChatAction; readonly channel: string }[] = [
 			{ action: { type: ActionType.ChatWorkingDirectorySet, directory: 'file:///tmp/extra-root' }, channel: defaultChatUri },
 			{ action: { type: ActionType.ChatWorkingDirectoryRemoved, directory: 'file:///tmp/extra-root' }, channel: defaultChatUri },
-			{ action: { type: ActionType.ChatTurnResume, turnId: 'turn-1' }, channel: defaultChatUri },
 		];
 
 		for (const [index, { action, channel }] of cases.entries()) {
@@ -1030,6 +1038,21 @@ suite('ProtocolServerHandler', () => {
 			assert.strictEqual(envelope.origin.clientId, clientId);
 			assert.strictEqual(envelope.origin.clientSeq, clientSeq);
 		}
+	});
+
+	test('turn resume reaches the agent service', () => {
+		stateManager.createSession(makeSessionSummary());
+		stateManager.dispatchServerAction(sessionUri, { type: ActionType.SessionReady });
+		const transport = connectClient('resume-client', [sessionUri, defaultChatUri]);
+		transport.sent.length = 0;
+
+		transport.simulateMessage(notification('dispatchAction', {
+			channel: defaultChatUri,
+			clientSeq: 1,
+			action: { type: ActionType.ChatTurnResume, turnId: 'turn-1' },
+		}));
+
+		assert.deepStrictEqual(agentService.handledActions.at(-1), { type: ActionType.ChatTurnResume, turnId: 'turn-1' });
 	});
 
 	test('session working-directory actions reach the agent service', () => {
