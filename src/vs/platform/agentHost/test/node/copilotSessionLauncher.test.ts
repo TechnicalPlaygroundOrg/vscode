@@ -5,6 +5,8 @@
 
 import type { CopilotClient, CopilotSession, PermissionHandler, PermissionRequest, ResumeSessionConfig, SessionConfig, Verbosity } from '@github/copilot-sdk';
 import assert from 'assert';
+import { useFakeTimers } from 'sinon';
+import { DeferredPromise } from '../../../../base/common/async.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -40,6 +42,7 @@ import { ByokLmProxyService, IByokLmProxyService, type IByokLmProxyHandle } from
 import { resolveCopilotMcpServerInfo, type ICopilotPluginInfo } from '../../node/copilot/copilotAgent.js';
 import { CopilotGitHubCredentials, CopilotGitHubSessionCredentials } from '../../node/copilot/copilotGitHubCredentials.js';
 import { CopilotExtensionsReloadToolName } from '../../node/copilot/copilotExtensionTools.js';
+import { CopilotManagedSettingsResolver } from '../../node/copilot/copilotManagedSettings.js';
 import { buildCopilotBuiltinAgents } from '../../node/copilot/copilotBuiltinAgents.js';
 import type { ShellManager } from '../../node/copilot/copilotShellTools.js';
 import type { CopilotSessionWrapper } from '../../node/copilot/copilotSessionWrapper.js';
@@ -472,6 +475,34 @@ suite('CopilotSessionLauncher sandbox policy', () => {
 	}
 
 	for (const kind of ['create', 'resume'] as const) {
+		test(`${kind} waits for slow managed settings before applying policy and starting the SDK session`, async () => {
+			const fixture = setup(kind);
+			const rpc = fixture.plan.client.rpc.managedSettings;
+			const result = await rpc.resolve({ clientName: 'vscode-agent-host' });
+			const gate = new DeferredPromise<typeof result>();
+			const started = new DeferredPromise<void>();
+			rpc.resolve = () => { started.complete(); return gate.p; };
+			const resolver = store.add(new CopilotManagedSettingsResolver(new NullLogService()));
+			const policies: typeof result.resolved[] = [];
+			const clock = useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+			try {
+				const launch = fixture.launcher.launch({ ...fixture.plan, managedSettingsResolver: resolver }, {
+					...testRuntime,
+					setApprovalPolicy: resolved => policies.push(resolved),
+				});
+				await started.p;
+				await clock.tickAsync(4000);
+				assert.deepStrictEqual({ captured: fixture.captured, policies }, { captured: undefined, policies: [] });
+				const restricted = { ...result.resolved, settings: { permissions: { deny: ['Shell'] } } };
+				gate.complete({ ...result, resolved: restricted });
+				store.add(await launch);
+				assert.deepStrictEqual({ created: !!fixture.captured, policies }, { created: true, policies: [restricted] });
+			} finally {
+				gate.complete(result);
+				clock.restore();
+			}
+		});
+
 		test(`${kind} sends sandbox environment credentials to the SDK and clears them on reset`, async () => {
 			const fixture = setup(kind);
 			fixture.configuration.updateSessionConfig(fixture.owner, { sandboxEnabled: 'on' });
@@ -2267,6 +2298,135 @@ suite('CopilotSessionLauncher resume fallback', () => {
 		} finally {
 			await launcher.disposeByokProxyHandle();
 		}
+	});
+});
+
+suite('CopilotSessionLauncher execution subagent', () => {
+	ensureNoDisposablesAreLeakedInTestSuite();
+
+	function setup(kind: 'create' | 'resume', defaultEnabled: boolean, runtimeAvailable: boolean, hasClientTool = true, setToolsError?: Error, catalogError?: Error) {
+		const toolUpdates: string[][] = [];
+		const logService = new CapturingLogService();
+		let descriptorRequests = 0;
+		let disconnects = 0;
+		const session = {
+			sessionId: 'execution-session',
+			on: () => () => { },
+			disconnect: async () => { disconnects++; },
+			setTools: async (tools: Parameters<CopilotSession['setTools']>[0]) => {
+				if (setToolsError) {
+					throw setToolsError;
+				}
+				toolUpdates.push(tools.map(tool => tool.name));
+			},
+			rpc: {
+				options: { update: async () => ({ success: true }) },
+				tools: {
+					getBuiltinDescriptors: async () => {
+						descriptorRequests++;
+						if (catalogError) {
+							throw catalogError;
+						}
+						return { tools: runtimeAvailable ? [{ name: 'execution_subagent' }] : [] };
+					},
+				},
+			},
+		} as unknown as CopilotSession;
+		const launcher = createTestLauncher(undefined, {
+			[CopilotCliConfigKey.ExecutionSubagent]: defaultEnabled,
+			[CopilotCliConfigKey.ModelCapabilityOverrides]: {
+				'*': { availableTools: ['builtin:*', 'custom:*'], excludedTools: ['mcp:*'] },
+			},
+		}, logService);
+		const base = {
+			client: returningSession(session),
+			extensionSdkPath: '/copilot-sdk',
+			sessionId: session.sessionId,
+			workingDirectory: testWorkingDirectory,
+			resolvedAgentName: undefined,
+			snapshot: { tools: hasClientTool ? [{ name: 'executionSubagent' }, { name: 'clientRead' }] : [], plugins: [], mcpServers: {} },
+			activeClientToolSet: new ActiveClientToolSet(),
+			shellManager: undefined,
+			githubCredentials: CopilotGitHubSessionCredentials.fromToken('token'),
+		};
+		const plan: CopilotSessionLaunchPlan = kind === 'create'
+			? { ...base, kind, model: undefined }
+			: { ...base, kind, fallback: { model: undefined } };
+		const runtime: ICopilotSessionRuntime = {
+			...testRuntime,
+			createClientSdkTools: () => base.snapshot.tools.map(tool => ({
+				name: tool.name,
+				description: tool.name,
+				handler: () => 'done',
+			})),
+		};
+		return { launch: () => launcher.launch(plan, runtime), toolUpdates, logService, descriptorRequests: () => descriptorRequests, disconnects: () => disconnects };
+	}
+
+	for (const kind of ['create', 'resume'] as const) {
+		for (const defaultEnabled of [false, true]) {
+			for (const runtimeAvailable of [false, true]) {
+				test(`${kind}: runtime execution availability=${runtimeAvailable} controls client tool suppression with VS Code default=${defaultEnabled}`, async () => {
+					const fixture = setup(kind, defaultEnabled, runtimeAvailable);
+					const launched = await fixture.launch();
+					try {
+						assert.deepStrictEqual({
+							descriptorRequests: fixture.descriptorRequests(),
+							toolUpdates: fixture.toolUpdates,
+						}, {
+							descriptorRequests: 1,
+							toolUpdates: runtimeAvailable ? [['clientRead']] : [],
+						});
+					} finally {
+						launched.dispose();
+					}
+				});
+			}
+		}
+		for (const message of ['Method not found: tools.getBuiltinDescriptors', 'Runtime tool catalog RPC failed']) {
+			test(`${kind}: keeps the extension execution tool when the runtime catalog fails with ${message}`, async () => {
+				const error = new Error(message);
+				const fixture = setup(kind, false, false, true, undefined, error);
+				const launched = await fixture.launch();
+				try {
+					assert.deepStrictEqual({
+						descriptorRequests: fixture.descriptorRequests(),
+						toolUpdates: fixture.toolUpdates,
+						disconnects: fixture.disconnects(),
+						warnings: fixture.logService.warnings,
+					}, {
+						descriptorRequests: 1,
+						toolUpdates: [],
+						disconnects: 0,
+						warnings: [{
+							message: '[Copilot:execution-session] Could not resolve runtime tool catalog; keeping extension execution tool',
+							args: [error],
+						}],
+					});
+				} finally {
+					launched.dispose();
+				}
+			});
+		}
+	}
+
+	test('does not resolve the runtime tool catalog when the extension execution tool is absent', async () => {
+		const fixture = setup('create', true, true, false);
+		const launched = await fixture.launch();
+		try {
+			assert.deepStrictEqual({ descriptorRequests: fixture.descriptorRequests(), toolUpdates: fixture.toolUpdates }, {
+				descriptorRequests: 0, toolUpdates: [],
+			});
+		} finally {
+			launched.dispose();
+		}
+	});
+
+	test('disconnects and surfaces a failure to remove the competing extension execution tool', async () => {
+		const error = new Error('setTools failed');
+		const fixture = setup('resume', false, true, true, error);
+		await assert.rejects(fixture.launch(), failure => failure === error);
+		assert.strictEqual(fixture.disconnects(), 1);
 	});
 });
 

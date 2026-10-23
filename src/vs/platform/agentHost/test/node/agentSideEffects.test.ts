@@ -36,7 +36,7 @@ import { SessionConfigKey } from '../../common/sessionConfigKeys.js';
 import type { RootConfigChangedAction } from '../../common/state/protocol/actions.js';
 import { ChatStateSubscription } from '../../common/state/agentSubscription.js';
 import { ChangesSummary, ChatInputAnswerState, ChatInputAnswerValueKind, ChatInputQuestionKind, ChatInputResponseKind, ChatOriginKind, ConfirmationOptionKind, CustomizationEnablementKind, CustomizationType, McpAuthRequiredReason, McpServerStatus, SessionInputRequestKind } from '../../common/state/protocol/state.js';
-import { ActionType, ActionEnvelope, AuthRequiredReason, type ChatAction, type INotification, type SessionAction } from '../../common/state/sessionActions.js';
+import { ActionType, ActionEnvelope, AuthRequiredReason, type ChatAction, type INotification, type ProgressParams, type SessionAction } from '../../common/state/sessionActions.js';
 import { subagentChatUri } from '../../common/agentHostChatMinting.js';
 import { buildSubagentChatUri, buildChatUri, buildDefaultChatUri, ChatInteractivity, createErrorResponsePart, CustomizationLoadStatus, MessageAttachmentKind, MessageKind, PendingMessageKind, readUsageInfoMeta, ResponsePartKind, ROOT_STATE_URI, SessionLifecycle, SessionStatus, ToolCallCancellationReason, ToolCallConfirmationReason, ToolCallContributorKind, ToolCallStatus, ToolResultContentType, TurnState, customizationId, type ChatInputRequest, type ClientPluginCustomization, type Customization, type ISessionGitHubState, type PluginCustomization, type Turn } from '../../common/state/sessionState.js';
 import { IProductService } from '../../../product/common/productService.js';
@@ -4354,6 +4354,21 @@ suite('AgentSideEffects', () => {
 			]);
 		});
 
+		test('forwards provider setup progress on the root channel without requiring a session', () => {
+			const progress = disposables.add(new Emitter<Omit<ProgressParams, 'channel'>>());
+			const notifications: INotification[] = [];
+			disposables.add(stateManager.onDidEmitNotification(notification => notifications.push(notification)));
+			const registration = disposables.add(sideEffects.registerProgressListener(Object.assign(agent, { onDidReportProgress: progress.event })));
+			progress.fire({ progressToken: 'policy', progress: 0, total: 1, message: 'Waiting for policy' });
+			progress.fire({ progressToken: 'policy', progress: 1, total: 1 });
+			registration.dispose();
+			progress.fire({ progressToken: 'ignored', progress: 0 });
+			assert.deepStrictEqual(notifications, [
+				{ type: 'root/progress', channel: ROOT_STATE_URI, progressToken: 'policy', progress: 0, total: 1, message: 'Waiting for policy' },
+				{ type: 'root/progress', channel: ROOT_STATE_URI, progressToken: 'policy', progress: 1, total: 1 },
+			]);
+		});
+
 		test('maps agent progress events to state actions', () => {
 			setupSession();
 			startTurn('turn-1');
@@ -7246,13 +7261,14 @@ suite('AgentSideEffects', () => {
 				title: 'Renamed Default',
 			});
 
+			// Adding the peer persists the inherited default chat title first, so wait for the renamed values.
 			assert.deepStrictEqual({
 				sessionTitle: localStateManager.getSessionState(sessionUri.toString())?.title,
 				defaultChatTitle: localStateManager.getChatState(defaultChat)?.title,
-				persistedSessionTitle: await waitForMetadata(SESSION_CUSTOM_TITLE_KEY),
-				persistedSessionSource: await waitForMetadata(SESSION_CUSTOM_TITLE_SOURCE_KEY),
-				persistedChatTitle: await waitForMetadata(customChatTitleMetadataKey(defaultChat)),
-				persistedChatSource: await waitForMetadata(customChatTitleSourceMetadataKey(defaultChat)),
+				persistedSessionTitle: await waitForMetadata(SESSION_CUSTOM_TITLE_KEY, 'Renamed Default'),
+				persistedSessionSource: await waitForMetadata(SESSION_CUSTOM_TITLE_SOURCE_KEY, 'user'),
+				persistedChatTitle: await waitForMetadata(customChatTitleMetadataKey(defaultChat), 'Renamed Default'),
+				persistedChatSource: await waitForMetadata(customChatTitleSourceMetadataKey(defaultChat), 'user'),
 			}, {
 				sessionTitle: 'Renamed Default',
 				defaultChatTitle: 'Renamed Default',

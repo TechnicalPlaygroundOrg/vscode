@@ -38,7 +38,7 @@ import { ILogService, LogLevel } from '../../../log/common/log.js';
 import product from '../../../product/common/product.js';
 import { ITelemetryService } from '../../../telemetry/common/telemetry.js';
 import { ICopilotHomeService } from '../../../environment/common/copilotHome.js';
-import { AgentHostHydraFusionEnabledSettingId, CopilotCliConfigKey, CopilotCliVSCodeAssignmentContextKey, copilotCliConfigSchema, isCopilotHydraFusionModelId } from '../../common/copilotCliConfig.js';
+import { AgentHostCopilotExecutionSubagentEnabledSettingId, AgentHostCopilotExecutionSubagentModelSettingId, AgentHostHydraFusionEnabledSettingId, CopilotCliConfigKey, CopilotCliVSCodeAssignmentContextKey, copilotCliConfigSchema, isCopilotHydraFusionModelId } from '../../common/copilotCliConfig.js';
 import { logSettingExperimentTrigger } from '../../../telemetry/common/experimentTrigger.js';
 import { withCustomizationEnablement } from '../../common/customizationEnablement.js';
 import { isAutoModeRoutingTier, type AutoModeRoutingTier } from '../../common/autoModeTiers.js';
@@ -58,7 +58,6 @@ import { isReasoningEffortLevel } from '../../common/reasoningEffort.js';
 import { agentModelConfigurationMetaKey, IAgentRuntimeModelConfiguration, readAgentRuntimeModelConfiguration } from '../../common/meta/agentModelConfigurationMeta.js';
 import { agentModelConfigurationReportKey, type IAgentModelConfigurationReport } from '../../common/agentModelConfiguration.js';
 import { createCopilotModelConfigurationReport } from './copilotManagedModelConfiguration.js';
-import { resolveCopilotManagedSettings } from './copilotManagedSettings.js';
 import { ObservedTokenUsage } from './observedTokenUsage.js';
 import { META_DIFF_BASE_BRANCH } from '../../common/agentHostGitService.js';
 import { stripRedundantCdPrefix } from '../../common/commandLineHelpers.js';
@@ -85,7 +84,7 @@ import { CopilotSessionWrapper, type ICopilotByokSessionConfig, type ICopilotMod
 import { allowCopilotSdkExecution, restoreDeferredCopilotSdkExecution } from './copilotSessionExecutionMarker.js';
 import { getCopilotSdkToolResourceUri } from './copilotSdkMeta.js';
 import { isAutoModel } from './modelIdentifiers.js';
-import { clientToolNamesFromSnapshot, composeByokSessionConfig, findLocalModelDirectFamily, isMcpServerExplicitlyProjected, toSessionConfigMcpServers, type CopilotSessionLaunchPlan, type IActiveClientSnapshot, type ICopilotSessionLauncher, type ICopilotSessionRuntime } from './copilotSessionLauncher.js';
+import { clientToolNamesFromSnapshot, composeByokSessionConfig, findLocalModelDirectFamily, isMcpServerExplicitlyProjected, resolveCopilotSessionManagedSettings, toSessionConfigMcpServers, type CopilotSessionLaunchPlan, type IActiveClientSnapshot, type ICopilotSessionLauncher, type ICopilotSessionRuntime } from './copilotSessionLauncher.js';
 import { CLIENT_TOOL_SEARCH_REFERENCE_NAME, NON_DEFERRED_CLIENT_TOOL_NAMES, RUNTIME_TOOL_SEARCH_TOOL_NAME, searchToolsWithoutClient } from './toolSearchDeferral.js';
 import { ActiveClientToolSet } from '../activeClientState.js';
 import { AgentHostTelemetryReporter, toInitiatorTelemetry, type IAgentHostEventClassification, type IAgentHostEventTelemetry, type ICanvasExtensionsReadyEvent } from '../agentHostTelemetryReporter.js';
@@ -589,6 +588,8 @@ const realpath = promisify(fsRealpath);
 const CONTROL_PLANE_RPC_TIMEOUT_MS = 30_000;
 const CONNECTOR_REFRESH_TIMEOUT_MS = 60_000;
 const SUBAGENT_TASK_COMPLETION_DELAY_MS = 250;
+/** The longest a `tasks.readOutput` call may wait for a detached shell to write more output. */
+const DETACHED_SHELL_OUTPUT_WAIT_MS = 30_000;
 /** Type of the `session.info` and `session.warning` events about preparing plugins required by the organization. */
 const MANAGED_PLUGINS_EVENT_TYPE = 'managed_plugins';
 /** Type of the `session.info` event sent when plugins required by the organization are ready. */
@@ -1183,6 +1184,7 @@ export class CopilotAgentSession extends Disposable {
 	}>();
 	/** Cancels callbacks that began before or during an SDK abort. */
 	private readonly _abortCts = this._register(new MutableDisposable<CancellationTokenSource>());
+	private readonly _lifetimeCts = this._register(new CancellationTokenSource());
 	/** Delays cancelled callbacks until the SDK abort settles or the session is disposed. */
 	private _abortBarrier: DeferredPromise<void> | undefined;
 	/**
@@ -1760,7 +1762,7 @@ export class CopilotAgentSession extends Disposable {
 	private readonly _pendingFusionEvents: CopilotFusionEvent[] = [];
 	private _requiresFusionEventOwnership = false;
 	private _fusionTurnCancelled = false;
-	private _hydraFusionV2ExperimentTriggerPending = false;
+	private readonly _pendingSettingExperimentTriggers = new Set<string>();
 	private _hasFusionRootTurnBoundary = false;
 	private readonly _activities: Record<CopilotActivitySource, string | undefined> = { intent: undefined, command: undefined, fusion: undefined, localModel: undefined };
 	private _publishedActivity: string | undefined;
@@ -2654,6 +2656,40 @@ export class CopilotAgentSession extends Disposable {
 			this._logService.warn(`[Copilot:${this.sessionId}] Failed to reconcile background task status: ${getErrorMessage(err)}`);
 			if (!this._store.isDisposed && this._backgroundWorkObservers > 0) {
 				this._backgroundShellRefresh.schedule();
+			}
+		});
+	}
+
+	/**
+	 * Streams a detached shell's output into the terminal of the tool call
+	 * that started it. A detached shell sends no `tool.shell_output`, so each
+	 * read continues from the previous read's cursor and waits for more output
+	 * until it reaches the end of the log of the exited shell.
+	 */
+	private _readDetachedShellOutput(toolCallId: string, shellId: string): void {
+		const read = async () => {
+			let cursor: string | undefined;
+			while (this._nonPtyShellTerminals.isReadingDetachedShell(toolCallId)) {
+				const page = await this._wrapper.session.rpc.tasks.readOutput({ id: shellId, cursor, waitMs: DETACHED_SHELL_OUTPUT_WAIT_MS });
+				if (this._store.isDisposed) {
+					return;
+				}
+				cursor = page.cursor;
+				if (page.text) {
+					this._nonPtyShellTerminals.appendDetachedShellOutput(toolCallId, page.text);
+				}
+				if (page.exit) {
+					this._nonPtyShellTerminals.completeDetachedShell(toolCallId, page.exit.exitCode);
+					// Remove the shell from the chat's background work without waiting for the next task read.
+					this._refreshBackgroundTasks();
+					return;
+				}
+			}
+		};
+		void read().catch(err => {
+			if (!this._store.isDisposed) {
+				this._logService.warn(`[Copilot:${this.sessionId}] Stopped reading detached shell ${shellId} output: ${getErrorMessage(err)}`);
+				this._nonPtyShellTerminals.stopReadingDetachedShell(toolCallId);
 			}
 		});
 	}
@@ -3724,7 +3760,7 @@ export class CopilotAgentSession extends Disposable {
 	 * wires up all event listeners. Must be called exactly once after
 	 * construction before using the session.
 	 */
-	async initializeSession(): Promise<void> {
+	async initializeSession(token = CancellationToken.None): Promise<void> {
 		this._assertScopedGitHubCredential();
 		await this._customizationEnablementService.initializeSession(this.launchOwner.toString());
 		await this._refreshUserMcpServerNames();
@@ -3739,7 +3775,7 @@ export class CopilotAgentSession extends Disposable {
 			this._reconcileMcpServerEnablement().catch(error => this._logService.error(error, `[Copilot:${this.sessionId}] Failed to reconcile MCP enablement after customizations changed`));
 		}));
 		this._subscribeToPermissionConfigChanges();
-		await this._initializeSdkWrapper();
+		await this._initializeSdkWrapper(token);
 
 		// Advertise the agent host's server tools for this session so clients
 		// see them as server-provided. Execution happens in-process via the SDK
@@ -3758,10 +3794,21 @@ export class CopilotAgentSession extends Disposable {
 		}
 	}
 
-	private async _initializeSdkWrapper(): Promise<void> {
+	private async _initializeSdkWrapper(token = CancellationToken.None): Promise<void> {
 		while (true) {
 			this._requiresRestartAfterTelemetryRevocation = false;
-			const wrapper = await this._sessionLauncher.launch(this._launchPlan, this._createRuntimeAdapter());
+			const launchCancellation = new CancellationTokenSource(this._lifetimeCts.token);
+			const cancellation = token.onCancellationRequested(() => launchCancellation.cancel());
+			let wrapper: CopilotSessionWrapper;
+			try {
+				if (token.isCancellationRequested) {
+					throw new CancellationError();
+				}
+				wrapper = await this._sessionLauncher.launch(this._launchPlan, this._createRuntimeAdapter(launchCancellation.token));
+			} finally {
+				cancellation.dispose();
+				launchCancellation.dispose();
+			}
 			if (this._store.isDisposed) {
 				wrapper.dispose();
 				throw new CancellationError();
@@ -4246,8 +4293,9 @@ export class CopilotAgentSession extends Disposable {
 		}
 	}
 
-	private _createRuntimeAdapter(): ICopilotSessionRuntime {
+	private _createRuntimeAdapter(cancellationToken: CancellationToken): ICopilotSessionRuntime {
 		return {
+			cancellationToken,
 			setApprovalPolicy: (resolved, bridged) => {
 				this._approvalPolicy.setLaunchPolicy(resolved, bridged);
 			},
@@ -5752,6 +5800,7 @@ export class CopilotAgentSession extends Disposable {
 	 */
 	override dispose(): void {
 		this._clearCanvasProjection();
+		this._lifetimeCts.cancel();
 		this._invalidateMappedEvents();
 		this._settleIdleWaiters(false);
 		void this._editTracker.flushAttribution().catch(error => {
@@ -5866,7 +5915,10 @@ export class CopilotAgentSession extends Disposable {
 			return;
 		}
 		try {
-			const policy = await resolveCopilotManagedSettings(this._launchPlan.client.rpc.managedSettings, this._launchPlan.githubCredentials.token, 30_000, this.workingDirectory?.fsPath);
+			const policy = await resolveCopilotSessionManagedSettings(this._launchPlan, this._lifetimeCts.token);
+			if (this._store.isDisposed) {
+				return;
+			}
 			await this._awaitControlPlaneRpc('session.model.list', this._wrapper.session.rpc.model.list());
 			const current = await this._awaitControlPlaneRpc('session.model.getCurrent', this._wrapper.session.rpc.model.getCurrent());
 			if (generation !== this._modelConfigurationGeneration || this._store.isDisposed) {
@@ -6790,14 +6842,24 @@ export class CopilotAgentSession extends Disposable {
 	}
 
 	/**
-	 * Marks where HydraFusion starts routing as v1 or v2, in every arm of a HydraFusion version
-	 * experiment. Held until the workbench forwards its assignment context, because
+	 * Holds setting exposure until the workbench forwards its assignment context, because
 	 * agent host telemetry cannot be attributed to an experiment before then.
 	 */
-	private _reportHydraFusionV2ExperimentTrigger(): void {
-		this._hydraFusionV2ExperimentTriggerPending = typeof this._configurationService.getRootConfigValues?.()[CopilotCliVSCodeAssignmentContextKey] !== 'string';
-		if (!this._hydraFusionV2ExperimentTriggerPending) {
-			logSettingExperimentTrigger(this._telemetryService, AgentHostHydraFusionEnabledSettingId);
+	private _reportSettingExperimentTrigger(settingId: string): void {
+		const defaultControlledKey = settingId === AgentHostCopilotExecutionSubagentEnabledSettingId
+			? CopilotCliConfigKey.ExecutionSubagentDefaultControlled
+			: settingId === AgentHostCopilotExecutionSubagentModelSettingId
+				? CopilotCliConfigKey.ExecutionSubagentModelDefaultControlled
+				: undefined;
+		if (defaultControlledKey !== undefined && this._configurationService.getRootValue(copilotCliConfigSchema, defaultControlledKey) !== true) {
+			this._pendingSettingExperimentTriggers.delete(settingId);
+			return;
+		}
+		if (typeof this._configurationService.getRootConfigValues?.()[CopilotCliVSCodeAssignmentContextKey] !== 'string') {
+			this._pendingSettingExperimentTriggers.add(settingId);
+		} else {
+			this._pendingSettingExperimentTriggers.delete(settingId);
+			logSettingExperimentTrigger(this._telemetryService, settingId);
 		}
 	}
 
@@ -6807,11 +6869,13 @@ export class CopilotAgentSession extends Disposable {
 			void this._syncImageGenerationAfterConfigChange();
 			// The forwarded shell init setting lives in root config.
 			void this._syncShellInitScript();
-			if (this._hydraFusionV2ExperimentTriggerPending) {
+			if (this._pendingSettingExperimentTriggers.size > 0) {
 				// Deferred so that the listener installing the forwarded assignment context on telemetry runs first.
 				queueMicrotask(() => {
-					if (this._hydraFusionV2ExperimentTriggerPending && !this._store.isDisposed) {
-						this._reportHydraFusionV2ExperimentTrigger();
+					if (!this._store.isDisposed) {
+						for (const settingId of this._pendingSettingExperimentTriggers) {
+							this._reportSettingExperimentTrigger(settingId);
+						}
 					}
 				});
 			}
@@ -8345,6 +8409,9 @@ export class CopilotAgentSession extends Disposable {
 			if (isShellCommandTool && !ptyTerminalUri) {
 				nonPtyCompletion = this._nonPtyShellTerminals.completeToolCall(e.data.toolCallId, toolOutput, shellExit);
 				if (nonPtyCompletion?.backgroundShellId !== undefined) {
+					if (nonPtyCompletion.detached) {
+						this._readDetachedShellOutput(e.data.toolCallId, nonPtyCompletion.backgroundShellId);
+					}
 					// Republish background work so the shell's entry points at this call's live terminal.
 					this._refreshBackgroundTasks();
 				}
@@ -10300,7 +10367,7 @@ export class CopilotAgentSession extends Disposable {
 			return;
 		}
 		if (event.type === 'session.fusion_route_started') {
-			this._reportHydraFusionV2ExperimentTrigger();
+			this._reportSettingExperimentTrigger(AgentHostHydraFusionEnabledSettingId);
 		}
 		const update = this._fusionProgress.accept(event);
 		if (update) {
@@ -10624,6 +10691,10 @@ export class CopilotAgentSession extends Disposable {
 			this._resumeSubagentForEvent(e);
 			if (!e.agentId) {
 				if (this._currentTurn.value) {
+					// Runtime assignments can override the enablement default. Include both
+					// setting experiments without excluding unavailable-model treatments.
+					this._reportSettingExperimentTrigger(AgentHostCopilotExecutionSubagentEnabledSettingId);
+					this._reportSettingExperimentTrigger(AgentHostCopilotExecutionSubagentModelSettingId);
 					this._currentTurn.value.activeSdkTurnId = e.data.turnId;
 					this._currentTurn.value.sdkTurnIds.add(e.data.turnId);
 					this._hasFusionRootTurnBoundary = true;
