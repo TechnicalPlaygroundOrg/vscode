@@ -621,6 +621,12 @@ The Responses (`/responses`) regenerator announces each output item before strea
 
 Same as above — it's platform-specific real execution, not the proxy. See the worktree and provider-specific file-operation gates for established patterns.
 
+### Codex passes its tests but cannot remove its temporary home
+
+Codex's native plugin marketplace starts a background Git fetch of `openai/plugins` outside the replay proxy. If shutdown interrupts that work, Windows can keep a `.codex/.tmp/plugins-clone-*` directory locked: synchronous removal reports `EPERM`, while asynchronous removal identifies the clone directory with `EBUSY`. This caused the intermittent suite-cleanup failure tracked in [#339760](https://github.com/microsoft/vscode/issues/339760).
+
+Codex record/replay servers disable `features.plugins` to keep this unrelated marketplace bootstrap out of the tests. Client-provided plugin skills, agents, and MCP servers are configured by the host independently and remain covered by the same tests. Keep cleanup strict and retain its underlying filesystem errors so other teardown failures remain diagnosable.
+
 ### Fixture leaks a username / absolute path / token
 
 Normalization missed something (e.g. a path that `ls` line-wrapped, or a new secret field). Add/extend a placeholder in `capiReplayProxy.ts` (`_normalize` + the `*_RE` redactors), then re-record. Never hand-edit secrets back in.
@@ -640,6 +646,14 @@ In replay one server serves every test (see [Server lifecycle](#server-lifecycle
 ### Read or archive state is lost after a graceful host restart
 
 Check the logs from both sides of the restart for storage load errors and failed shutdown drains. A `root/sessionSummaryChanged` notification precedes background catalog synchronization; graceful shutdown must drain those writes even if global storage or another persistence flush fails. Host-owned JSON storage uses atomic replacement so an interrupted write cannot leave the next host with a truncated file. Keep the restart assertions intact: sleeping after the notification would hide a persistence failure rather than fix it.
+
+### A snapshot intermittently includes `chat/isReadChanged` after `chat/turnComplete`
+
+Turn completion precedes the unread lifecycle action. Wait for `chat/isReadChanged` with `isRead: false` on the same chat and a greater `serverSeq` before taking the snapshot. The turn driver and snapshot scenario runner share this barrier; do not remove the unread action from the snapshot or add a sleep.
+
+### A later test fails on unexpected console output after a snapshot mismatch
+
+Check for a `Deleting 1 old snapshots` message from the preceding test. A previous failed iteration leaves a diagnostic `.actual` file; a passing iteration removes it. Diagnostic cleanup must not report a baseline mutation, which CI correctly rejects. The snapshot helper cleans these artifacts silently while continuing to report removal of actual baselines.
 
 ### CI infra flakes (not your code)
 
