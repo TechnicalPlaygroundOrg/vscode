@@ -655,6 +655,7 @@ suite('TabbedModelPicker', () => {
 		const attempts: IModelPickerComparisonState = {
 			title: 'Attempts', description: 'Select models.', summary: '2 Attempts', selectedModelIds: [],
 			multiple: true, maxSelections: 10, canGoBack: false, canGoNext: false, canFinish: false, hasNextStep: true,
+			nextLabel: 'Configure Judge',
 		};
 		const state = observableValue<IModelPickerComparisonState | undefined>('comparison', undefined);
 		let finished = false;
@@ -667,10 +668,26 @@ suite('TabbedModelPicker', () => {
 			select: id => state.set({ ...state.get()!, selectedModelIds: [id], canGoNext: state.get()!.hasNextStep !== false, canFinish: true, status: { text: '1 selected' } }, undefined),
 			setCount: () => { },
 			getVariants: () => [], addVariant: () => { }, removeVariant: () => { },
-			back: () => state.set(attempts, undefined),
+			back: () => {
+				if (state.get()?.title === 'Synthesizer') {
+					state.set({ ...state.get()!, title: 'Judge', backLabel: 'Configure Attempts', nextLabel: 'Configure Synthesis' }, undefined);
+				} else {
+					state.set(attempts, undefined);
+				}
+			},
 			next: () => {
 				const toSynthesizer = state.get()?.title === 'Judge';
-				state.set({ ...attempts, title: toSynthesizer ? 'Synthesizer' : 'Judge', description: 'Optional review.', multiple: false, canGoBack: true, canFinish: true, hasNextStep: !toSynthesizer }, undefined);
+				state.set({
+					...attempts,
+					title: toSynthesizer ? 'Synthesizer' : 'Judge',
+					description: 'Optional review.',
+					multiple: false,
+					canGoBack: true,
+					canFinish: true,
+					hasNextStep: !toSynthesizer,
+					backLabel: toSynthesizer ? 'Configure Judge' : 'Configure Attempts',
+					nextLabel: toSynthesizer ? undefined : 'Configure Synthesis',
+				}, undefined);
 			},
 			finish: () => finished = true,
 		};
@@ -723,7 +740,7 @@ suite('TabbedModelPicker', () => {
 			accessible: firstRow.getAttribute('aria-label'),
 			hover: firstRow.getAttribute('title'),
 		}, {
-			heading: 'Select models.', comparisonScope: true, routing: false, checks: 3, checkboxes: 3, buttons: ['Done (disabled)', 'Next (disabled)'], status: '',
+			heading: 'Select models.', comparisonScope: true, routing: false, checks: 3, checkboxes: 3, buttons: ['Done (disabled)', 'Configure Judge (disabled)'], status: '',
 			badge: '25% off', configuration: 'Low · 32K', details: 'First Details, Low · 32K',
 			accessible: 'First, 25% off, Effort Level: Low, Context: 32K',
 			hover: 'First · Low · 32K',
@@ -752,27 +769,29 @@ suite('TabbedModelPicker', () => {
 			count: popup.querySelector('select'),
 			buttons: buttons(),
 			status: footerStatus(),
-		}, { visible: true, selected: 1, selections: [], checked: 1, count: null, buttons: ['Done', 'Next'], status: '1 selected' });
-		button('Next').click();
+		}, { visible: true, selected: 1, selections: [], checked: 1, count: null, buttons: ['Done', 'Configure Judge'], status: '1 selected' });
+		button('Configure Judge').click();
 		assert.deepStrictEqual({
 			heading: popup.querySelector('.action-list-header-text')?.textContent,
 			buttons: buttons(),
 			radios: offered('menuitemradio'),
 			checkboxes: popup.querySelectorAll('[role="menuitemcheckbox"], .chat-model-picker-comparison-checkbox').length,
-		}, { heading: 'Optional review.', buttons: ['Back', 'Done', 'Next (disabled)'], radios: 3, checkboxes: 0 });
+		}, { heading: 'Optional review.', buttons: ['Configure Attempts', 'Done', 'Configure Synthesis (disabled)'], radios: 3, checkboxes: 0 });
 		element(popup, '.chat-model-picker-model').click();
 		const judgeWithChoice = buttons();
-		button('Next').click();
+		button('Configure Synthesis').click();
 		assert.deepStrictEqual({
 			judgeWithChoice,
 			heading: popup.querySelector('.action-list-header-text')?.textContent,
 			radios: offered('menuitemradio'),
 			buttons: buttons(),
-		}, { judgeWithChoice: ['Back', 'Done', 'Next'], heading: 'Optional review.', radios: 3, buttons: ['Back', 'Done'] });
-		button('Back').click();
+		}, { judgeWithChoice: ['Configure Attempts', 'Done', 'Configure Synthesis'], heading: 'Optional review.', radios: 3, buttons: ['Configure Judge', 'Done'] });
+		button('Configure Judge').click();
+		assert.strictEqual(popup.querySelector('.action-list-header-text')?.textContent, 'Optional review.');
+		button('Configure Attempts').click();
 		assert.strictEqual(popup.querySelector('.action-list-header-text')?.textContent, 'Select models.');
 		element(popup, '.chat-model-picker-model').click();
-		button('Next').click();
+		button('Configure Judge').click();
 		button('Done').click();
 		assert.deepStrictEqual({ finished, visible: picker.isVisible, selections, hides }, { finished: true, visible: false, selections: [], hides: [true] });
 	});
@@ -836,7 +855,7 @@ suite('TabbedModelPicker', () => {
 			const { popup } = createPicker({ comparison });
 			assert.deepStrictEqual({
 				hint: !!popup.querySelector('.tabbed-action-list-footer'),
-				toggle: !!popup.querySelector('[aria-label="Compare Models"] .codicon-trophy'),
+				toggle: !!popup.querySelector('[aria-label="Compare Models"] .codicon-compare'),
 			}, { hint: showHint === true, toggle: true });
 		});
 	}
@@ -911,7 +930,7 @@ suite('TabbedModelPicker', () => {
 				const toggle = element(popup, '[aria-label="Compare Models"]');
 				const style = dom.getWindow(toggle).getComputedStyle(toggle);
 				return {
-					trophy: !!toggle.querySelector('.codicon-trophy'), pressed: toggle.getAttribute('aria-pressed'),
+					compare: !!toggle.querySelector('.codicon-compare'), pressed: toggle.getAttribute('aria-pressed'),
 					background: style.backgroundColor, border: style.borderColor,
 					width: toggle.offsetWidth, height: toggle.offsetHeight,
 				};
@@ -933,9 +952,9 @@ suite('TabbedModelPicker', () => {
 				initialToggle, activeToggle, inactiveToggle: toggleState(),
 			}, {
 				rows: initialModels, height: initialRows,
-				initialToggle: { trophy: true, pressed: 'false', background: 'rgba(0, 0, 0, 0)', border: 'rgba(0, 0, 0, 0)', width: 28, height: 28 },
-				activeToggle: { trophy: true, pressed: 'true', background: 'rgb(10, 20, 30)', border: 'rgb(40, 50, 60)', width: 28, height: 28 },
-				inactiveToggle: { trophy: true, pressed: 'false', background: 'rgba(0, 0, 0, 0)', border: 'rgba(0, 0, 0, 0)', width: 28, height: 28 },
+				initialToggle: { compare: true, pressed: 'false', background: 'rgba(0, 0, 0, 0)', border: 'rgba(0, 0, 0, 0)', width: 28, height: 28 },
+				activeToggle: { compare: true, pressed: 'true', background: 'rgb(10, 20, 30)', border: 'rgb(40, 50, 60)', width: 28, height: 28 },
+				inactiveToggle: { compare: true, pressed: 'false', background: 'rgba(0, 0, 0, 0)', border: 'rgba(0, 0, 0, 0)', width: 28, height: 28 },
 			});
 			element(popup, '[aria-label="Compare Models"]').click();
 			element(popup, '.model-picker-comparison-done').click();
