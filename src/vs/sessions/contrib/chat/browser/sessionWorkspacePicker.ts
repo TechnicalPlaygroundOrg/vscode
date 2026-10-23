@@ -797,12 +797,11 @@ export class WorkspacePicker extends Disposable {
 
 	protected _buildListOptions(items: readonly IActionListItem<IWorkspacePickerItem>[], pickerWidth: number | undefined): IActionListOptions {
 		const isConsolidatedWorkspacePicker = this._useConsolidatedRemoteWorkspaces() && this._directPickerAttachesContext !== true;
-		const hasRemoteSubmenu = isConsolidatedWorkspacePicker && this._directPickerGroup === undefined;
 		const showFilter = isConsolidatedWorkspacePicker
 			|| items.filter(i => i.kind === ActionListItemKind.Action).length > FILTER_THRESHOLD;
 		return showFilter
-			? { className: 'sessions-new-chat-picker-list', showFilter: true, focusFilterOnOpen: isConsolidatedWorkspacePicker, filterPlaceholder: isConsolidatedWorkspacePicker ? localize('workspacePicker.filter', "Search") : undefined, submenuPointerIntent: hasRemoteSubmenu, reserveSubmenuSpace: false, inlineDescription: true, showGroupTitleOnFirstItem: true, minWidth: pickerWidth, maxWidth: pickerWidth, hideDefaultKeybindingTooltip: true }
-			: { className: 'sessions-new-chat-picker-list', submenuPointerIntent: hasRemoteSubmenu, reserveSubmenuSpace: false, inlineDescription: true, showGroupTitleOnFirstItem: true, minWidth: pickerWidth, maxWidth: pickerWidth, hideDefaultKeybindingTooltip: true };
+			? { className: 'sessions-new-chat-picker-list', showFilter: true, focusFilterOnOpen: isConsolidatedWorkspacePicker, filterPlaceholder: isConsolidatedWorkspacePicker ? localize('workspacePicker.filter', "Search") : undefined, reserveSubmenuSpace: false, inlineDescription: true, showGroupTitleOnFirstItem: true, minWidth: pickerWidth, maxWidth: pickerWidth, hideDefaultKeybindingTooltip: true }
+			: { className: 'sessions-new-chat-picker-list', reserveSubmenuSpace: false, inlineDescription: true, showGroupTitleOnFirstItem: true, minWidth: pickerWidth, maxWidth: pickerWidth, hideDefaultKeybindingTooltip: true };
 	}
 
 	/**
@@ -1658,7 +1657,7 @@ export class WorkspacePicker extends Disposable {
 			const actionLabel = action === this._localBrowseAction
 				&& this._useConsolidatedRemoteWorkspaces()
 				&& this._directPickerAttachesContext !== true
-				? localize('workspacePicker.chooseFolder', "Choose Folder")
+				? localize('workspacePicker.openFolder', "Open Folder...")
 				: this._useConsolidatedRemoteWorkspaces()
 					? action.label.replace(/(?:\.\.\.|\u2026)$/, '')
 					: action.label;
@@ -1829,7 +1828,6 @@ export class WorkspacePicker extends Disposable {
 					filterAsCombobox: true,
 					focusFilterOnOpen: true,
 					minWidth: 180,
-					maxWidth: 180,
 					hideDefaultKeybindingTooltip: true,
 				},
 			});
@@ -1867,10 +1865,14 @@ export class WorkspacePicker extends Disposable {
 			return items;
 		}
 
+		const noWorkspaceAriaDescription = this._useConsolidatedRemoteWorkspaces()
+			? localize('workspacePicker.noFolderDescription', "Start the session in a temporary directory.")
+			: undefined;
 		const noWorkspace: IActionListItem<IWorkspacePickerItem> = {
 			kind: ActionListItemKind.Action,
 			label: this._getNoWorkspaceLabel(),
 			description: this._useConsolidatedRemoteWorkspaces() ? undefined : noWorkspaceOption.description,
+			ariaDescription: noWorkspaceAriaDescription,
 			group: { title: '', icon: this._useConsolidatedRemoteWorkspaces() ? Codicon.comment : Codicon.commentDiscussion },
 			item: {
 				checked: noWorkspaceOption.isSelected || undefined,
@@ -1892,7 +1894,7 @@ export class WorkspacePicker extends Disposable {
 
 	private _getNoWorkspaceLabel(): string {
 		return this._useConsolidatedRemoteWorkspaces()
-			? localize('workspacePicker.startFromScratch', "Start from Scratch")
+			? localize('workspacePicker.chat', "Chat")
 			: localize('workspacePicker.noWorkspace', "No workspace");
 	}
 
