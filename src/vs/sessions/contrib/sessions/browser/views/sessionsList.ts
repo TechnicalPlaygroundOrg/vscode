@@ -27,10 +27,10 @@ import { fromNow } from '../../../../../base/common/date.js';
 import { KeyCode } from '../../../../../base/common/keyCodes.js';
 import { isEqual } from '../../../../../base/common/resources.js';
 import { localize } from '../../../../../nls.js';
-import { MenuId, IMenuService, MenuItemAction } from '../../../../../platform/actions/common/actions.js';
+import { MenuId, IMenuService, MenuItemAction, SubmenuItemAction } from '../../../../../platform/actions/common/actions.js';
 import { MenuWorkbenchToolBar } from '../../../../../platform/actions/browser/toolbar.js';
 import { DropdownWithPrimaryActionViewItem } from '../../../../../platform/actions/browser/dropdownWithPrimaryActionViewItem.js';
-import { getFlatContextMenuActions } from '../../../../../platform/actions/browser/menuEntryActionViewItem.js';
+import { createActionViewItem, getFlatContextMenuActions } from '../../../../../platform/actions/browser/menuEntryActionViewItem.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { IContextKey, IContextKeyService, RawContextKey } from '../../../../../platform/contextkey/common/contextkey.js';
 import { MarshalledId } from '../../../../../base/common/marshallingIds.js';
@@ -371,7 +371,7 @@ class SessionsTreeDelegate implements IListVirtualDelegate<SessionListItem> {
 	private static readonly SECTION_HEIGHT = 26;
 	private static readonly SESSIONS_HEADER_HEIGHT = SESSIONS_HEADER_DEFAULT_HEIGHT + SESSIONS_HEADER_VERTICAL_SPACING;
 	private static readonly SHOW_MORE_HEIGHT = 26;
-	private static readonly PLACEHOLDER_HEIGHT = 26;
+	private static readonly PLACEHOLDER_HEIGHT = SessionsTreeDelegate.ITEM_HEIGHT_QUICK_CHAT;
 
 	constructor(
 		private readonly _approvalModel: AgentSessionApprovalModel | undefined,
@@ -675,6 +675,7 @@ class SessionChatItemRenderer implements ITreeRenderer<SessionListItem, FuzzySco
 		const scopedInstantiationService = disposables.add(this.instantiationService.createChild(new ServiceCollection([IContextKeyService, contextKeyService])));
 		const titleToolbar = disposables.add(scopedInstantiationService.createInstance(MenuWorkbenchToolBar, titleToolbarContainer, Menus.SessionChatItemToolbar, {
 			menuOptions: { shouldForwardArgs: true },
+			telemetrySource: 'sessionsList.chatRow',
 		}));
 
 		// Approval row — mirrors the session row's approval prompt but scoped to
@@ -1146,6 +1147,11 @@ function renderInlineRenameInput(
 	return input;
 }
 
+interface ISessionOnboardingTarget {
+	readonly session: ISession;
+	readonly archiveAction: boolean;
+}
+
 interface ISessionItemTemplate {
 	readonly container: HTMLElement;
 	readonly statusIcon: SessionStatusIcon;
@@ -1239,13 +1245,13 @@ class SessionItemRenderer implements ITreeRenderer<SessionListItem, FuzzyScore, 
 
 	constructor(
 		private readonly options: {
-			grouping: () => SessionsGrouping; isPinned: (session: ISession) => boolean; isRenderedInCustomGroup?: (session: ISession) => boolean; visibleSessions: IObservable<readonly (IActiveSession | undefined)[]>; getMultiSelectedSessions: (session: ISession) => ISession[]; showHover: boolean; useCompactQuickChatRows: boolean; compact: () => boolean; approvalRowMaxLines: number; aggregateChatApprovals: boolean; toolbarMenuId: MenuId | undefined; inlineRename: boolean; contextViewService?: IContextViewService; handleToolbarAction?: (action: IAction, session: ISession) => boolean | Promise<boolean>; onDidDoubleClickRename?: (session: ISession) => void; onDidFinishRename?: () => void; activeGuideSessionIds?: IObservable<ReadonlySet<string>>;
+			grouping: () => SessionsGrouping; isPinned: (session: ISession) => boolean; isRenderedInCustomGroup?: (session: ISession) => boolean; visibleSessions: IObservable<readonly (IActiveSession | undefined)[]>; getMultiSelectedSessions: (session: ISession) => ISession[]; showHover: boolean; useCompactQuickChatRows: boolean; compact: () => boolean; approvalRowMaxLines: number; aggregateChatApprovals: boolean; toolbarMenuId: MenuId | undefined; toolbarTelemetrySource: string; inlineRename: boolean; contextViewService?: IContextViewService; handleToolbarAction?: (action: IAction, session: ISession) => boolean | Promise<boolean>; onDidDoubleClickRename?: (session: ISession) => void; onDidFinishRename?: () => void; activeGuideSessionIds?: IObservable<ReadonlySet<string>>;
 			/** Whether status presentation derives from the main chat instead of the aggregate session. */
 			deriveStatusFromMainChat?: boolean;
 			activeSession?: IObservable<IActiveSession | undefined>;
 			/** Sessions whose hidden child rows should contribute in-progress status to the parent row. */
 			collapsedSessionIds?: IObservable<ReadonlySet<string>>;
-			archiveOnboardingSession?: IObservable<ISession | undefined>;
+			onboardingTarget?: IObservable<ISessionOnboardingTarget | undefined>;
 			isRenderedInExternalSection?: (session: ISession) => boolean;
 		},
 		private readonly approvalModel: AgentSessionApprovalModel | undefined,
@@ -1355,8 +1361,9 @@ class SessionItemRenderer implements ITreeRenderer<SessionListItem, FuzzyScore, 
 			titleToolbar = disposables.add(scopedInstantiationService.createInstance(MenuWorkbenchToolBar, titleToolbarContainer, this.options.toolbarMenuId, {
 				menuOptions: { shouldForwardArgs: true },
 				actionRunner,
+				telemetrySource: this.options.toolbarTelemetrySource,
 				actionViewItemProvider: (action, options) => {
-					if (action.id !== ARCHIVE_SESSION_COMMAND_ID || !(action instanceof MenuItemAction) || !this.options.archiveOnboardingSession) {
+					if (action.id !== ARCHIVE_SESSION_COMMAND_ID || !(action instanceof MenuItemAction) || !this.options.onboardingTarget) {
 						return actionViewItemProvider(action, options);
 					}
 					return scopedInstantiationService.createInstance(class extends SessionArchiveActionViewItem {
@@ -1392,9 +1399,14 @@ class SessionItemRenderer implements ITreeRenderer<SessionListItem, FuzzyScore, 
 			template.renderedSession.set(undefined, undefined);
 			template.container.classList.remove('archive-onboarding', 'renaming');
 		}));
-		if (this.options.archiveOnboardingSession) {
+		if (this.options.onboardingTarget) {
 			template.elementDisposables.add(autorun(reader => {
-				template.container.classList.toggle('archive-onboarding', this.options.archiveOnboardingSession?.read(reader)?.sessionId === element.sessionId);
+				const target = this.options.onboardingTarget?.read(reader);
+				const isTarget = target?.session.sessionId === element.sessionId;
+				template.container.classList.toggle('archive-onboarding', isTarget && target.archiveAction);
+				if (isTarget && !target.archiveAction) {
+					reader.store.add(markOnboardingTarget(template.container, getSessionOnboardingTargetId(element)));
+				}
 			}));
 		}
 
@@ -1881,6 +1893,10 @@ export function getSessionArchiveOnboardingTargetId(session: ISession): string {
 	return `sessions.archiveAction.${session.sessionId}`;
 }
 
+export function getSessionOnboardingTargetId(session: ISession): string {
+	return `sessions.session.${session.sessionId}`;
+}
+
 /**
  * The folder a chat works in, shown on its row when the session spans more than
  * one project and the chat works in exactly one folder.
@@ -2103,7 +2119,13 @@ export class SessionSectionRenderer implements ITreeRenderer<SessionListItem, Fu
 		const scopedInstantiationService = disposables.add(this.instantiationService.createChild(new ServiceCollection([IContextKeyService, contextKeyService])));
 		const toolbar = disposables.add(scopedInstantiationService.createInstance(MenuWorkbenchToolBar, toolbarContainer, SessionSectionToolbarMenuId, {
 			menuOptions: { shouldForwardArgs: true },
+			telemetrySource: 'sessionsList.section',
 			actionViewItemProvider: (action, options) => {
+				// Dropdowns share the toolbar's action runner, which already logs
+				// `workbenchActionExecuted`; skip the duplicate `contextMenu` event.
+				if (action instanceof SubmenuItemAction) {
+					return createActionViewItem(scopedInstantiationService, action, { ...options, skipTelemetry: true });
+				}
 				if (action.id !== NEW_SESSION_FOR_WORKSPACE_ACTION_ID || !(action instanceof MenuItemAction)) {
 					return undefined;
 				}
@@ -2127,7 +2149,8 @@ export class SessionSectionRenderer implements ITreeRenderer<SessionListItem, Fu
 					'',
 					{
 						hoverDelegate: options.hoverDelegate,
-						menuAsChild: false
+						menuAsChild: false,
+						skipTelemetry: true,
 					},
 				);
 
@@ -2355,6 +2378,7 @@ class SessionGroupRenderer implements ITreeRenderer<SessionListItem, FuzzyScore,
 		const scopedInstantiationService = disposables.add(this.instantiationService.createChild(new ServiceCollection([IContextKeyService, contextKeyService])));
 		const toolbar = disposables.add(scopedInstantiationService.createInstance(MenuWorkbenchToolBar, toolbarContainer, SessionGroupToolbarMenuId, {
 			menuOptions: { shouldForwardArgs: true },
+			telemetrySource: 'sessionsList.group',
 		}));
 
 		return { container, icon, collapsed: observableValue(this, false), labelContainer, label, inputContainer, toolbarContainer, toolbar, chevron, contextKeyService, disposables, elementDisposables: disposables.add(new DisposableStore()) };
@@ -3305,7 +3329,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 		return ids;
 	});
 	private visible = true;
-	private readonly archiveOnboardingSession = observableValue<ISession | undefined>(this, undefined);
+	private readonly onboardingTarget = observableValue<ISessionOnboardingTarget | undefined>(this, undefined);
 	private readonly excludedSessionTypes: Set<string>;
 	private readonly excludedStatuses: Set<SessionStatus>;
 	private readonly sessionArchivedChatVisibilityOverrides = new Map<string, boolean>();
@@ -3477,6 +3501,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 				approvalRowMaxLines: DEFAULT_APPROVAL_ROW_MAX_LINES,
 				aggregateChatApprovals: false,
 				toolbarMenuId: Menus.SessionItemToolbar,
+				toolbarTelemetrySource: 'sessionsList.row',
 				inlineRename: true,
 				contextViewService: this.contextViewService,
 				onDidDoubleClickRename: session => this.preservePendingOpenFocus(session),
@@ -3485,7 +3510,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 				deriveStatusFromMainChat: true,
 				activeSession: this._sessionsService.activeSession,
 				collapsedSessionIds: this.collapsedSessionIds,
-				archiveOnboardingSession: this.archiveOnboardingSession,
+				onboardingTarget: this.onboardingTarget,
 			},
 			approvalModel,
 			undefined,
@@ -4058,7 +4083,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 			}
 		}
 		const activeSession = this._sessionsService.activeSession.get();
-		const archiveOnboardingSession = this.archiveOnboardingSession.get();
+		const onboardingSession = this.onboardingTarget.get()?.session;
 		const nextNestedSessionResources = new Set(
 			this.sessions
 				.filter(session => getSessionListChats(session).length > 0)
@@ -4091,7 +4116,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 		}
 
 		// Keep the active user-facing session visible even when another filter excludes it.
-		for (const revealedSession of [activeSession, archiveOnboardingSession]) {
+		for (const revealedSession of [activeSession, onboardingSession]) {
 			if (revealedSession && !filtered.some(s => s.sessionId === revealedSession.sessionId)) {
 				const match = this.sessions.find(s => s.sessionId === revealedSession.sessionId && !isAutomationSession(s));
 				if (match) {
@@ -4205,7 +4230,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 				}
 
 				for (const section of workspaceSections) {
-					if (!meetsCriteria(section) && section.id !== fallbackId && !this._sessionSectionOrderService.isPromoted(section.id) && !section.sessions.some(session => session.sessionId === archiveOnboardingSession?.sessionId)) {
+					if (!meetsCriteria(section) && section.id !== fallbackId && !this._sessionSectionOrderService.isPromoted(section.id) && !section.sessions.some(session => session.sessionId === onboardingSession?.sessionId)) {
 						moreFolderSectionIds.add(section.id);
 					}
 				}
@@ -4244,7 +4269,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 				expanded: this.expandedSessionGroups.has(sectionId),
 				sectionId,
 				sectionLabel,
-				revealSessionId: archiveOnboardingSession?.sessionId,
+				revealSessionId: onboardingSession?.sessionId,
 			});
 			const children = toSessionChildren(limited.sessions);
 			if (limited.showMore) {
@@ -4572,11 +4597,24 @@ export class SessionsList extends Disposable implements ISessionsList {
 
 	/** Reveals a session and keeps its archive action visible until the caller releases it. */
 	revealArchiveAction(session: ISession): IDisposable & { readonly targetId: string } {
+		return this.revealOnboardingTarget(session, true);
+	}
+
+	/** Keeps a session visible for a spotlight without changing the user's filters. */
+	revealSessionForOnboarding(session: ISession): IDisposable & { readonly targetId: string } {
+		return this.revealOnboardingTarget(session, false);
+	}
+
+	private revealOnboardingTarget(session: ISession, archiveAction: boolean): IDisposable & { readonly targetId: string } {
 		this.customViewService.hideCustomView();
 		this.closeFind();
-		this.archiveOnboardingSession.set(session, undefined);
+		const target = { session, archiveAction };
+		this.onboardingTarget.set(target, undefined);
 		const release = toDisposable(() => {
-			this.archiveOnboardingSession.set(undefined, undefined);
+			if (this.onboardingTarget.get() !== target) {
+				return;
+			}
+			this.onboardingTarget.set(undefined, undefined);
 			if (!this._store.isDisposed) {
 				this.update();
 			}
@@ -4590,7 +4628,7 @@ export class SessionsList extends Disposable implements ISessionsList {
 			release.dispose();
 			throw error;
 		}
-		return { targetId: getSessionArchiveOnboardingTargetId(session), dispose: () => release.dispose() };
+		return { targetId: archiveAction ? getSessionArchiveOnboardingTargetId(session) : getSessionOnboardingTargetId(session), dispose: () => release.dispose() };
 	}
 
 	clearFocus(): void {
@@ -6091,6 +6129,11 @@ export interface ISessionsFlatListOptions {
 	 * item toolbar menu.
 	 */
 	readonly toolbarMenuId?: MenuId;
+	/**
+	 * The `from` value of the `workbenchActionExecuted` event sent for row toolbar
+	 * actions. Defaults to `sessionsFlatList.row`.
+	 */
+	readonly toolbarTelemetrySource?: string;
 	/** Allows focused list surfaces to handle actions from their custom toolbar menu. */
 	readonly onToolbarAction?: (action: IAction, session: ISession) => boolean | Promise<boolean>;
 	/** Optional context menu shown for each session row. */
@@ -6181,6 +6224,7 @@ export class SessionsFlatList extends Disposable {
 				// only place an approval on any of its chats can surface.
 				aggregateChatApprovals: true,
 				toolbarMenuId: this.options.toolbarMenuId ?? Menus.SessionItemToolbar,
+				toolbarTelemetrySource: this.options.toolbarTelemetrySource ?? 'sessionsFlatList.row',
 				inlineRename: false,
 				handleToolbarAction: this.options.onToolbarAction,
 			},
