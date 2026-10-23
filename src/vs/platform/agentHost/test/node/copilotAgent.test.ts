@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { CopilotClient, CopilotClientOptions, CopilotSession, GitHubTelemetryNotification, PermissionMode, PermissionRequest, SessionEvent, SessionEventHandler, SessionEventPayload, SessionEventType, TypedSessionEventHandler } from '@github/copilot-sdk';
+import type { CopilotClient, CopilotClientOptions, CopilotSession, GitHubTelemetryNotification, PermissionAllowAllMode, PermissionRequest, SessionEvent, SessionEventHandler, SessionEventPayload, SessionEventType, TypedSessionEventHandler } from '@github/copilot-sdk';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { CCAModel } from '@vscode/copilot-api';
 import assert from 'assert';
@@ -593,10 +593,6 @@ interface ICredentialUpdateSession {
 class MockCopilotSession {
 	readonly sessionId = 'test-session-1';
 	readonly rpc = {
-		eventLog: {
-			registerInterest: async () => ({ handle: 'sampling-interest' }),
-			releaseInterest: async () => ({ success: true }),
-		},
 		options: {
 			update: async () => ({ success: true }),
 		},
@@ -604,7 +600,7 @@ class MockCopilotSession {
 			setCredentials: async () => ({ success: true, copilotUserResolved: true }),
 		},
 		permissions: {
-			setMode: async ({ mode }: { mode: PermissionMode }) => ({ success: true, mode }),
+			setAllowAll: async ({ mode }: { mode: PermissionAllowAllMode }) => ({ success: true, mode }),
 		},
 	};
 	private readonly _handlers = new Set<SessionEventHandler>();
@@ -5464,6 +5460,43 @@ suite('CopilotAgent', () => {
 			});
 			assert.deepStrictEqual(client.getSessionMetadataCalls, ['target']);
 			assert.strictEqual(client.listSessionCallCount, 0);
+		} finally {
+			await disposeAgent(agent);
+		}
+	});
+
+	test('getChatMetadata restores registered sessions from host metadata without an SDK lookup', async () => {
+		const sessionDataService = disposables.add(new TestSessionDataService());
+		const session = AgentSession.uri('copilotcli', 'target');
+		const workingDirectory = URI.file('/workspace');
+		const db = sessionDataService.openDatabase(session);
+		await db.object.setMetadata('copilot.workingDirectory', workingDirectory.toString());
+		db.dispose();
+
+		const client = new TestCopilotClient([sdkSession('target')]);
+		const agent = createTestAgent(disposables, { sessionDataService, copilotClient: client });
+		try {
+			const chat = defaultChatUri(session);
+			const metadata = await agent.getChatMetadata(chat, exactChatContext(session, chat, session), undefined, {
+				activation: 'restore',
+				registryFallback: { startTime: 10, modifiedTime: 20 },
+			});
+
+			assert.deepStrictEqual({
+				metadata: metadata && {
+					...withoutUndefinedProperties(metadata),
+					workingDirectories: metadata.workingDirectories?.map(directory => directory.toString()),
+				},
+				getSessionMetadataCalls: client.getSessionMetadataCalls,
+			}, {
+				metadata: {
+					chat,
+					startTime: 10,
+					modifiedTime: 20,
+					workingDirectories: [workingDirectory.toString()],
+				},
+				getSessionMetadataCalls: [],
+			});
 		} finally {
 			await disposeAgent(agent);
 		}
@@ -11155,7 +11188,7 @@ suite('CopilotAgent', () => {
 			const session = AgentSession.uri('copilotcli', 's1');
 			const dbRef = sessionDataService.openDatabase(session);
 			try {
-				await dbRef.object.setMetadata('copilot.workingDirectory', URI.file(workingDirectory).toString());
+				await dbRef.object.setMetadata('copilot.workingDirectories', JSON.stringify([URI.file(workingDirectory).toString()]));
 				await dbRef.object.setMetadata('copilot.agent', JSON.stringify({ uri: 'file:///old-client/data.md' }));
 			} finally {
 				dbRef.dispose();
@@ -11172,7 +11205,13 @@ suite('CopilotAgent', () => {
 			try {
 				await agent.authenticate(GITHUB_COPILOT_PROTECTED_RESOURCE.resource, 'token');
 				await internals._resumeSession('s1');
-				assert.deepStrictEqual(resumeAgents, [undefined]);
+				assert.deepStrictEqual({
+					resumeAgents,
+					getSessionMetadataCalls: client.getSessionMetadataCalls,
+				}, {
+					resumeAgents: [undefined],
+					getSessionMetadataCalls: [],
+				});
 			} finally {
 				await fs.rm(workingDirectory, { recursive: true, force: true });
 				await disposeAgent(agent);
