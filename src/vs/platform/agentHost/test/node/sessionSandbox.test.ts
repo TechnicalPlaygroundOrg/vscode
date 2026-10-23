@@ -16,7 +16,7 @@ import { buildChatUri, buildSubagentSessionUri, MessageKind, SessionStatus, Tool
 import { ActionType } from '../../common/state/sessionActions.js';
 import { AgentConfigurationService } from '../../node/agentConfigurationService.js';
 import { AgentHostStateManager } from '../../node/agentHostStateManager.js';
-import { projectCopilotSandboxPolicy } from '../../node/copilot/copilotSandboxPolicy.js';
+import { getCopilotBrowserSandboxNetworkRestrictions, projectCopilotSandboxPolicy } from '../../node/copilot/copilotSandboxPolicy.js';
 import { buildSandboxConfigForSdk } from '../../node/copilot/sandboxConfigForSdk.js';
 import { getSessionSandboxConfig, getSessionSandboxOverrides } from '../../node/sessionSandbox.js';
 import { SessionPermissionManager } from '../../node/sessionPermissions.js';
@@ -164,6 +164,41 @@ suite('Session sandbox configuration', () => {
 			{ enabled: 'on' },
 			{ enabled: 'off' },
 			{ enabled: 'on', allowUnsandboxedCommands: false },
+		]);
+	});
+
+	test('browser client tool network restrictions use session selection and managed outbound policy', () => {
+		const { configuration, create } = setupSession();
+		const enabled = create('network-enabled', { sandboxEnabled: 'on' });
+		const disabled = create('network-disabled', { sandboxEnabled: 'off' });
+		const managed = create('network-managed');
+		const bypassed = create('network-bypassed', { sandboxEnabled: 'off' });
+		const failClosed = create('network-fail-closed');
+		configuration.updateRootConfig({ sandbox: { enabled: 'off', allowNetwork: true, allowedNetworkDomains: ['example.com'], deniedNetworkDomains: ['private.example.com'] } });
+		configuration.setSessionSandboxPolicy(managed, { enabled: true, allowOutbound: false });
+		configuration.setSessionSandboxPolicy(bypassed, { enabled: true, allowBypass: true });
+		configuration.setSessionSandboxEnabled(bypassed, false);
+		configuration.updateSessionConfig(bypassed, { sandboxEnabled: 'off' });
+		configuration.setSessionSandboxPolicy(failClosed, { enabled: true, allowBypass: false, failClosed: true });
+		assert.deepStrictEqual([enabled, disabled, managed, bypassed, failClosed].map(session => getCopilotBrowserSandboxNetworkRestrictions(configuration, session, 'openBrowserPage')), [
+			{ sandboxEnabled: true, allowNetwork: true, allowedDomains: ['example.com'], deniedDomains: ['private.example.com'] },
+			{ sandboxEnabled: false, allowNetwork: true, allowedDomains: ['example.com'], deniedDomains: ['private.example.com'] },
+			{ sandboxEnabled: true, allowNetwork: false, allowedDomains: ['example.com'], deniedDomains: ['private.example.com'] },
+			{ sandboxEnabled: false, allowNetwork: true, allowedDomains: ['example.com'], deniedDomains: ['private.example.com'] },
+			{ sandboxEnabled: true, allowNetwork: true, allowedDomains: ['example.com'], deniedDomains: ['private.example.com'] },
+		]);
+	});
+
+	test('Copilot network metadata is limited to integrated-browser client tools', () => {
+		const { configuration, create } = setupSession();
+		const session = create('browser-only', { sandboxEnabled: 'on' });
+		const names = ['openBrowserPage', 'readPage', 'screenshotPage', 'navigatePage', 'clickElement', 'typeInPage',
+			'hoverElement', 'dragElement', 'handleDialog', 'runPlaywrightCode', 'list_browser_pages', 'fetchWebPage', 'run_in_terminal', 'read_file'];
+		assert.deepStrictEqual(names.map(name => [name, getCopilotBrowserSandboxNetworkRestrictions(configuration, session, name) !== undefined]), [
+			['openBrowserPage', true], ['readPage', true], ['screenshotPage', true], ['navigatePage', true],
+			['clickElement', true], ['typeInPage', true], ['hoverElement', true], ['dragElement', true],
+			['handleDialog', true], ['runPlaywrightCode', true], ['list_browser_pages', true],
+			['fetchWebPage', false], ['run_in_terminal', false], ['read_file', false],
 		]);
 	});
 
@@ -399,7 +434,7 @@ suite('Session sandbox configuration', () => {
 				denied: initial.map(value => ({
 					...value, network: false, bypass: false,
 					sdk: {
-						enabled: true, allowBypass: false,
+						enabled: true, addCurrentWorkingDirectory: true, allowBypass: false,
 						auth: { git: true, gh: true },
 						userPolicy: {
 							filesystem: { readonlyPaths: ['/reference'], deniedPaths: ['/private'] },
@@ -732,11 +767,16 @@ suite('Session sandbox configuration', () => {
 		const { manager, configuration, create } = setupSession();
 		const owner = create('bypass-options');
 		const permissions = store.add(new SessionPermissionManager(manager, {}, configuration, new NullLogService(), createSessionDataService()));
-		const options = [false, true].map(canAllowSessionSandboxBypass => permissions.createToolReadyAction({
-			kind: 'pending_confirmation', chat: URI.parse(buildChatUri(owner, 'peer')), requestSandboxBypass: true, canAllowSessionSandboxBypass,
+		const cases = [
+			{ canAllowSessionSandboxBypass: false, requestSandboxPermissive: false },
+			{ canAllowSessionSandboxBypass: true, requestSandboxPermissive: false },
+			{ canAllowSessionSandboxBypass: true, requestSandboxPermissive: true },
+		];
+		const options = cases.map(({ canAllowSessionSandboxBypass, requestSandboxPermissive }) => permissions.createToolReadyAction({
+			kind: 'pending_confirmation', chat: URI.parse(buildChatUri(owner, 'peer')), requestSandboxBypass: true, requestSandboxPermissive, canAllowSessionSandboxBypass,
 			state: { status: ToolCallStatus.PendingConfirmation, toolCallId: 'tool', toolName: 'bash', displayName: 'Bash', invocationMessage: 'run', confirmationTitle: 'Outside sandbox?' },
 		}, owner, 'turn').options?.map(option => option.id));
-		assert.deepStrictEqual(options, [['allow-once', 'skip'], ['allow-session', 'allow-once', 'skip']]);
+		assert.deepStrictEqual(options, [['allow-once', 'skip'], ['allow-session', 'allow-once', 'skip'], ['allow-once', 'skip']]);
 	});
 
 	test('managed sandbox confirmations keep only the one-time and deny actions', () => {
