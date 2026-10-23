@@ -471,6 +471,7 @@ import './services/sessions/browser/sessionsService.js';
 import './services/workspaceFolderLabel/browser/workspaceFolderLabelService.js';
 import './services/mcp/browser/mcpWorkspaceInstallTargetService.js';
 import './services/customView/browser/customViewService.js';
+import './services/activity/common/sessionActivityBarActivityService.js';
 import './browser/parts/menubar.contribution.js';
 import './browser/layoutActions.js';
 
@@ -478,7 +479,6 @@ import './contrib/accountMenu/browser/account.contribution.js';
 import './contrib/aiCustomizationTreeView/browser/aiCustomizationTreeView.contribution.js';
 import './contrib/chat/browser/chat.contribution.js';
 import './contrib/chat/browser/sharedChatInputComposer.contribution.js';
-import './contrib/chat/browser/btwSlashCommand.contribution.js';
 import './contrib/chat/browser/requestOriginProvider.contribution.js';
 import './contrib/chat/browser/sideChatProvider.contribution.js';
 import './contrib/sessionComparison/browser/sessionComparison.contribution.js';
