@@ -83,7 +83,7 @@ import { AGENT_MERGE_CHANGESET_ID, buildBranchChangesetUri, buildSessionChangese
 import { type ICopilotApiService, type ICopilotApiServiceRequestOptions, type ICopilotUtilityChatCompletionRequest } from '../../node/shared/copilotApiService.js';
 import { getWorktreesRoot, WorktreeIsolation, WORKTREE_META_REPOSITORY_ROOT } from '../../node/shared/worktreeIsolation.js';
 import { readSessionAdditionalWorktrees, writeSessionAdditionalWorktrees } from '../../node/shared/sessionAdditionalWorktrees.js';
-import { AhpErrorCodes, AHP_SESSION_NOT_FOUND, ContentEncoding, JSON_RPC_INTERNAL_ERROR, ProtocolError } from '../../common/state/sessionProtocol.js';
+import { AhpErrorCodes, AHP_SESSION_NOT_FOUND, ContentEncoding, JSON_RPC_INTERNAL_ERROR, ProtocolError, type IStateSnapshot } from '../../common/state/sessionProtocol.js';
 import type { IAgentServerToolHost } from '../../common/agentServerTools.js';
 import { ArtifactServerToolName, SessionServerToolName } from '../../common/serverToolNames.js';
 import { buildMcpChannel } from '../../node/shared/mcpCustomizationController.js';
@@ -3759,7 +3759,7 @@ suite('AgentService (node dispatcher)', () => {
 			});
 		});
 
-		test('applies independent read actions to the default chat only', async () => {
+		test('keeps the session unread when another chat is unread', async () => {
 			const svc = disposables.add(createTestAgentService(new NullLogService(), fileService, createSessionDataService(new TestSessionDatabase()), { _serviceBrand: undefined } as IProductService, createNoopGitService()));
 			const agent = new MockAgent('copilot');
 			disposables.add(toDisposable(() => agent.dispose()));
@@ -3791,6 +3791,42 @@ suite('AgentService (node dispatcher)', () => {
 					{ kind: 'default', isRead: true },
 					{ kind: 'peer', isRead: false },
 				],
+			});
+		});
+
+		test('promotes and persists the session when the last unread chat becomes read', async () => {
+			const database = new TestSessionDatabase();
+			const svc = disposables.add(createTestAgentService(new NullLogService(), fileService, createSessionDataService(database), { _serviceBrand: undefined } as IProductService, createNoopGitService()));
+			const agent = new MockAgent('copilot');
+			disposables.add(toDisposable(() => agent.dispose()));
+			registerTestAgentProvider(svc, agent);
+			const session = await svc.createSession({ provider: 'copilot' });
+			const sessionUri = session.toString();
+			const defaultChat = buildDefaultChatUri(sessionUri);
+			const peerChat = buildChatUri(session, 'peer');
+			const stateManager = getStateManager(svc);
+			stateManager.addChat(sessionUri, peerChat);
+			stateManager.dispatchServerAction(peerChat, { type: ActionType.ChatIsReadChanged, isRead: false });
+			stateManager.dispatchServerAction(defaultChat, { type: ActionType.ChatIsReadChanged, isRead: true });
+			const sessionReadPromise = Event.toPromise(Event.filter(svc.onDidAction, envelope =>
+				envelope.action.type === ActionType.SessionIsReadChanged && envelope.action.isRead));
+
+			svc.dispatchAction(peerChat, {
+				type: ActionType.ChatIsReadChanged,
+				isRead: true,
+			}, 'test-client', 1);
+			await sessionReadPromise;
+
+			assert.deepStrictEqual({
+				sessionRead: isSessionStatusRead(stateManager.getSessionState(sessionUri)!.status),
+				defaultChatRead: isSessionStatusRead(stateManager.getChatState(defaultChat)!.status),
+				peerChatRead: isSessionStatusRead(stateManager.getChatState(peerChat)!.status),
+				persistedSessionRead: await database.getMetadata(AH_META_IS_READ_DB_KEY),
+			}, {
+				sessionRead: true,
+				defaultChatRead: true,
+				peerChatRead: true,
+				persistedSessionRead: 'true',
 			});
 		});
 
@@ -15043,6 +15079,61 @@ suite('AgentService (node dispatcher)', () => {
 					files: 0,
 				},
 			);
+		});
+
+		test('superseding a turn changeset subscription during cold restore keeps the latest changeset available', async () => {
+			const localService = disposables.add(createTestAgentService(
+				new NullLogService(), fileService, createSessionDataService(new TestSessionDatabase()),
+				{ _serviceBrand: undefined } as IProductService, createNoopGitService(),
+			));
+			registerTestAgentProvider(localService, copilotAgent);
+			const session = await localService.createSession({ provider: 'copilot' });
+			const chat = buildDefaultChatUri(session);
+			const previous = buildTurnChangesetUri(chat, 'previous');
+			const latest = buildTurnChangesetUri(chat, 'latest');
+			const stateManager = getStateManager(localService);
+			stateManager.deleteSession(session.toString());
+			const restoring = new DeferredPromise<void>();
+			const finishRestore = new DeferredPromise<void>();
+			copilotAgent.getChatCustomizations = async () => {
+				restoring.complete();
+				await finishRestore.p;
+				return [];
+			};
+			const emitted: ActionEnvelope[] = [];
+			disposables.add(localService.onDidAction(envelope => {
+				if (envelope.channel === previous || envelope.channel === latest) {
+					emitted.push(envelope);
+				}
+			}));
+			let isActive = true;
+			const subscribing = localService.subscribe(URI.parse(previous), 'client-turn', () => isActive);
+			const rejected = assert.rejects(subscribing, /Subscription cancelled/);
+			await restoring.p;
+			let snapshot: IStateSnapshot;
+			try {
+				isActive = false;
+				localService.unsubscribe(URI.parse(previous), 'client-turn');
+				snapshot = await localService.subscribe(URI.parse(latest), 'client-turn');
+			} finally {
+				finishRestore.complete();
+			}
+			await rejected;
+
+			assert.deepStrictEqual({
+				snapshotResource: snapshot.resource,
+				previousAvailable: !!stateManager.getSnapshot(previous),
+				latestAvailable: !!stateManager.getSnapshot(latest),
+				previousPublished: emitted.some(envelope => envelope.channel === previous && envelope.action.type === ActionType.ChangesetContentChanged),
+				latestPublished: emitted.some(envelope => envelope.channel === latest && envelope.action.type === ActionType.ChangesetContentChanged),
+			}, {
+				snapshotResource: latest,
+				previousAvailable: true,
+				latestAvailable: true,
+				previousPublished: true,
+				latestPublished: true,
+			});
+			localService.unsubscribe(URI.parse(latest), 'client-turn');
 		});
 
 		for (const cached of [undefined, [], ['file:///wd/cached.ts']]) {
