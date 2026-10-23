@@ -75,6 +75,16 @@ suite('Chat Accessibility Help', () => {
 		}, { finished: true, subagentTail: true, parentTail: true });
 	});
 
+	test('documents keyboard access to subagent chats and inline details', () => {
+		const help = getAccessibilityHelpText('agentView', new MockKeybindingService(), true);
+		assert.deepStrictEqual({
+			focus: help.includes('Use Tab to focus a subagent pill'),
+			open: help.includes('Enter or Space to open its chat'),
+			inline: help.includes('Enter or Space expands or collapses its inline details'),
+			status: help.includes('announces its running state and any pending confirmations'),
+		}, { focus: true, open: true, inline: true, status: true });
+	});
+
 	test('documents the Copilot tab switch and independent provider navigation', () => {
 		const help = getAccessibilityHelpText('agentView', new MockKeybindingService(), true);
 		assert.deepStrictEqual({
@@ -105,10 +115,11 @@ suite('Chat Accessibility Help', () => {
 			visibility: help.includes('on the hovered, selected, or keyboard-focused model'),
 			inlinePreferences: help.includes('In Auto mode, use Up and Down Arrow to focus an "Optimize for" preference'),
 			hydra: help.includes('HydraFusion, when available, is an alternative routing choice'),
+			hydraDescription: help.includes('press Right Arrow to open its description and focus Learn more'),
 			activation: help.includes('Enter or Space applies the preference and keeps the picker open'),
 			autoEntry: help.includes('both the Auto name and preference readout in the chat input open these routing choices'),
 			noAutoDetails: help.includes('Auto has no separate details page'),
-		}, { details: true, inspection: true, inputShortcut: true, defaults: true, visibility: true, inlinePreferences: true, hydra: true, activation: true, autoEntry: true, noAutoDetails: true });
+		}, { details: true, inspection: true, inputShortcut: true, defaults: true, visibility: true, inlinePreferences: true, hydra: true, hydraDescription: true, activation: true, autoEntry: true, noAutoDetails: true });
 	});
 
 	test('documents keyboard search in the model picker', () => {
@@ -317,6 +328,16 @@ suite('Chat Accessibility Help', () => {
 				agentView: false,
 			});
 		});
+	});
+
+	test('documents default-on terminal output reflow and how to disable it', () => {
+		const help = getAccessibilityHelpText('agentView', new MockKeybindingService(), true);
+		assert.deepStrictEqual({
+			defaultOn: help.includes('Terminal output reflows to fit the chat width by default'),
+			disable: help.includes('Set chat.tools.terminal.outputReflow to false'),
+			fixedWidth: help.includes('fixed-width previews with horizontal scrolling'),
+			previewOnly: help.includes('only changes the preview, not the terminal running the command'),
+		}, { defaultOn: true, disable: true, fixedWidth: true, previewOnly: true });
 	});
 
 	test('documents full terminal output in chat surfaces that render terminal tools', () => {
